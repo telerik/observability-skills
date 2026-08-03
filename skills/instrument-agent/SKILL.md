@@ -39,9 +39,29 @@ Scan the repo and report what you found, then the diff you intend to make,
   A client pointed at an **OpenAI-compatible endpoint** (OpenRouter, LiteLLM,
   vLLM, Together, most gateways) counts as OpenAI — see the reference.
 - **Existing telemetry** — OpenTelemetry setup, Traceloop, or a previous
-  Progress Observability init. Never stack a second tracer. If the app already
-  exports OTel, add Progress as an **additional exporter** alongside it —
-  don't replace what's there without saying so first.
+  Progress Observability init. Look for it before writing anything, and check
+  the reference for ordering rather than assuming init belongs first.
+
+  **Python (measured).** The SDK attaches to a provider the app already
+  installed, so Progress ends up alongside the app's exporter rather than
+  replacing it — **but only if init runs after the app's own setup**. Init
+  first and the app's `set_tracer_provider()` becomes a no-op with one warning
+  line, killing its existing telemetry while Progress spans keep arriving.
+  Grep for `set_tracer_provider` / `TracerProvider(`. Details in
+  `references/python.md`.
+
+  **.NET (measured).** No ordering constraint: providers coexist and the
+  app's own tracing is unaffected. The hazard is different — a chat client
+  that already has `.UseOpenTelemetry()` records every call twice once
+  `.AddObservability()` is added, doubling token and cost figures. Grep for
+  `UseOpenTelemetry` before wiring and report the overlap rather than
+  removing either layer yourself. Progress spans land in their own trace by
+  design; see `references/dotnet.md`.
+
+  **TypeScript: not measured here.** Don't carry the Python behavior across;
+  if you hit an app with existing OTel, say the interaction is unverified
+  rather than guessing, and check the traces on both sides before declaring
+  success.
 - **Scope** — a monorepo, several services, or more than one agent needs a
   "which one?" question before you touch anything. Don't pick for the user.
 - **Config style** — dotenv, user secrets, plain env — instrumentation config
@@ -76,7 +96,10 @@ Rules that hold across all three:
 - **Init at process start, before any LLM client exists.** In ESM Node that
   means the hooks import and `Observability.instrument()` run before the app is
   even imported; in Python, before clients are constructed; in .NET, before the
-  agent is built.
+  agent is built. **Two exceptions, both in the language references:** an app
+  that installs its own OpenTelemetry provider (init goes after that), and
+  Haystack (init goes after `import haystack.tracing`). Check the reference
+  before assuming earlier is safer — in both cases it isn't.
 - **Minimal diff.** Typically: one dependency, one import, one init call, env
   var wiring, and a flush-on-exit. If you find yourself moving app code around,
   stop and reconsider — including "just" exporting a module-scope script so you
@@ -148,7 +171,7 @@ Rules that hold across all three:
   names itself for its own reasons — an agent's `name:`, a service
   registration, a CLI banner — leave that alone and introduce a separate
   `app_name`. Pointing an existing field at your new env var makes the app's
-  behaviour change with a telemetry setting, which is app logic edited for an
+  behavior change with a telemetry setting, which is app logic edited for an
   instrumentation task.
 - **Content capture default is ON.** Prompts/completions are sent unless
   content tracing is disabled. For apps handling sensitive data, offer the
