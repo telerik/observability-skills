@@ -62,6 +62,49 @@ Useful kwargs: `trace_content=False` (sensitive data),
 `block_instruments=` (a `set` of `ObservabilityInstruments`), `debug=True`
 (verbose logging when nothing arrives).
 
+## The app already sets up OpenTelemetry — init goes AFTER its provider
+
+If the app calls `trace.set_tracer_provider(...)` itself, run `instrument()`
+**after** that line. This is the one case where init at process start is wrong.
+
+```python
+provider = TracerProvider(
+    resource=Resource.create({"service.name": "ticket-triage"})
+)
+provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+trace.set_tracer_provider(provider)          # the app's own setup, untouched
+
+Observability.instrument(                    # ← after, never before
+    app_name=os.environ.get("OBSERVABILITY_APP_NAME", "my-app"),
+    api_key=os.environ["OBSERVABILITY_API_KEY"],
+)
+```
+
+App provider first, then `instrument()`: Progress attaches to the existing
+provider. The global provider is unchanged, its processor list grows, and both
+exporters receive every span. Adding alongside takes no extra step (measured).
+
+`instrument()` first, then the app's provider: the app's
+`set_tracer_provider()` is a no-op. OTel logs
+`Overriding of current TracerProvider is not allowed` and carries on, and the
+app's exporter receives nothing for the rest of the process. Progress spans
+still arrive and the run still looks healthy, so the loss appears only in
+whatever the app was exporting to beforehand.
+
+**`app_name` is inert once attached.** Spans carry the app's resource, so they
+land under its `service.name`, not the name passed to `instrument()`. Change
+the app's `Resource` / `OTEL_SERVICE_NAME` to control the platform identity,
+and agree it with the user first — it is the app's own identity field. Pass
+`app_name` regardless; it applies if the app stops owning a provider.
+
+**The app's `provider.shutdown()` already flushes Progress.** Its exporter
+hangs off that provider. `Observability.shutdown()` is idempotent — it logs
+`Exporter already shutdown, ignoring call` — but adds nothing when the app
+already shuts its provider down.
+
+Grep for `set_tracer_provider`, `TracerProvider(`, or an `opentelemetry-sdk`
+dependency before writing anything.
+
 ## What auto-instruments
 
 Anything in `ObservabilityInstruments` (1:1 with Traceloop instruments):
@@ -226,7 +269,7 @@ from progress.observability import workflow, task, agent, tool
 | Use | For |
 |---|---|
 | `@workflow` | The entry point. One per user request, wrapping everything below. |
-| `@task` | An internal step that transforms data in-process — classify, summarise, route, parse. |
+| `@task` | An internal step that transforms data in-process — classify, summarize, route, parse. |
 | `@agent` | A unit that *decides* what to do next, usually an LLM loop. |
 | `@tool` | Anything the code **calls out to**: lookup, fetch, DB query, API or file read, retrieval. |
 
