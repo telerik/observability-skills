@@ -101,6 +101,69 @@ is what the platform files spans under, while `name:` is the agent's, and
 pointing it at the telemetry variable makes the app's behavior change with an
 observability setting. Leave it as it is.
 
+### Agents built from `AIProjectClient` (Azure AI Foundry)
+
+An agent built straight from the project client (`Microsoft.Agents.AI.Foundry`
+package) has no chat-client chain to attach to:
+
+```csharp
+AIAgent agent = new AIProjectClient(endpoint, credential)
+    .AsAIAgent(model: "gpt-4o", instructions: instructions)
+    .AsBuilder()
+    .Build();
+```
+
+`Initialize()` alone exports nothing here — it only listens; nothing in this
+pipeline emits. Add the emitter on the agent builder:
+
+```csharp
+    .AsBuilder()
+    .UseOpenTelemetry(sourceName: ObservabilityTracer.SourceName)
+    .Build();
+```
+
+**Add `using Microsoft.Agents.AI;` to the file you edit.** `AsBuilder()` and
+`UseOpenTelemetry()` are extension methods from that namespace, and a file
+that only consumes a ready-made agent usually does not import it. Without
+the directive the build fails with `CS1061: 'AIAgent' does not contain a
+definition for 'AsBuilder'`. On an agent the app already holds, the wrapper
+is a reassignment, not a mutation:
+`agent = agent.AsBuilder().UseOpenTelemetry(...).Build();` — calls on the
+old reference stay uninstrumented.
+
+**`sourceName:` is required.** Without it the wrapper emits on
+`Experimental.Microsoft.Agents.AI`, which Progress does not listen to, and
+still nothing exports. Wired this way each run produces one `invoke_agent`
+span — agent name, instructions, response id, and
+`gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens`. The usage
+attributes are documented by Agent Framework, not measured here. There is no
+separate `chat` span at this level.
+
+What the two `AsAIAgent` overloads mean for capture:
+
+- **`AsAIAgent(model:, instructions:)`** builds a local `ChatClientAgent`
+  over the project's Responses endpoint — LLM calls do transit the process.
+  Per-call `chat` and tool spans are reachable, but only by restructuring to
+  an explicit chat client attached at the proven point:
+
+  ```csharp
+  var chatClient = projectClient.GetProjectOpenAIClient()
+      .GetProjectResponsesClient()
+      .AsIChatClient(deployment)
+      .AddObservability();
+  ```
+
+  Default to the agent-level wrapper — it keeps the app's shape. Restructure
+  only when the task asks for per-call LLM spans.
+- **`AsAIAgent(agentRecord)`** (a versioned `FoundryAgent`, defined in the
+  Foundry portal) executes server-side. The agent-level wrapper is the
+  ceiling: LLM calls never transit the process, and no client-side wiring
+  can add `chat` spans.
+
+Don't enable both the agent-level wrapper and `.AddObservability()` on the
+same pipeline with inputs/outputs recorded — both layers record the prompt
+and response, duplicating content.
+
 ### Hosted apps (DI, `AddChatClient`, ASP.NET or a worker)
 
 All three touch points move. Don't reach for the console shape:
