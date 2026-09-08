@@ -1,6 +1,6 @@
 # .NET — `Progress.Observability.Instrumentation`
 
-Verified against `Progress.Observability.Instrumentation` 1.2.2 on NuGet, as
+Verified against `Progress.Observability.Instrumentation` 1.4.0 on NuGet, as
 wired (and proven to build and trace) in
 [`observability-oss/dotnet-agent-starter`](https://github.com/observability-oss/dotnet-agent-starter)
 — that repo is the canonical example; when in doubt, read its `Program.cs`
@@ -346,11 +346,11 @@ backend too, that is one line on their existing builder:
 .AddSource("Progress.Observability.AgentMonitoring")
 ```
 
-**The package floors OpenTelemetry at 1.15.3.** An app pinned lower fails
-`dotnet add package` with
-`NU1605: Detected package downgrade: OpenTelemetry`. The fix is raising the
-app's `OpenTelemetry` reference to `>= 1.15.3` — say so rather than leaving
-the restore error to explain itself.
+**The package floors OpenTelemetry at 1.17.0.** An app pinned lower fails
+restore with `NU1605: Detected package downgrade: OpenTelemetry`. Raise the
+app's `OpenTelemetry` **and** `OpenTelemetry.Exporter.*` references to
+`1.17.0` in the same diff that adds the package, and say so in the report
+rather than leaving the restore error to explain itself.
 
 ## Verified against the platform
 
