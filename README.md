@@ -1,11 +1,11 @@
 # observability-skills
 
 Agent skills for the [Progress Observability](https://www.telerik.com/ai-observability-platform)
-platform. Six skills, each self-contained, installable individually or together.
+platform. Eight skills, each self-contained, installable individually or together.
 
-This repo is the **canonical source for skill content**. Packaging — the Claude
-Code plugin, slash commands, the VS Code Copilot bundle — and the end-to-end
-test harness live in
+This repo is the **canonical source for the six observability skills** below.
+Their packaging — the Claude Code plugin, slash commands, the VS Code Copilot
+bundle — and the end-to-end test harness live in
 [`progress-observability-plugin`](https://github.com/observability-oss/progress-observability-plugin),
 which consumes this repo.
 
@@ -23,6 +23,21 @@ which consumes this repo.
 All six read the platform over MCP. Each carries its own copy of the contract at
 `skills/<name>/references/mcp.md`, so a skill works when copied out on its own.
 
+### Agent builders
+
+| Skill | What it does |
+|---|---|
+| [`build-template-agent`](skills/build-template-agent/SKILL.md) | Copies, builds, and runs one of four .NET 10 agent templates |
+| [`build-custom-agent`](skills/build-custom-agent/SKILL.md) | Builds a bounded local .NET 10 prototype or returns an integration plan |
+
+Copy each complete skill directory using the install steps below. Both builders
+require .NET 10, Azure OpenAI configuration, and a Progress Observability
+Integration key; no MCP connection is required. These are local development
+agents. See the
+[template README](skills/build-template-agent/assets/release-evidence-reviewer/README.md#configure)
+and [custom README](skills/build-custom-agent/assets/custom-agent-starter/README.md#configure)
+for setup, secret storage, and cleanup.
+
 ## Install
 
 Skills are plain directories. Copy the ones you want into the location your
@@ -38,15 +53,15 @@ cp -r skills/instrument-agent ~/.github/skills/
 
 Per-project, drop them in `.claude/skills/` or `.github/skills/` instead.
 
-For the packaged experience — slash commands, marketplace install, the VS Code
-bundle — use the plugin repo linked above.
+For the packaged experience of the six observability skills — slash commands,
+marketplace install, the VS Code bundle — use the plugin repo linked above.
 
 ## Configuration
 
-Every skill except `instrument-agent` reads the platform through the Progress
-Observability MCP server (`instrument-agent` only writes instrumentation code and
-never reads back). Two different keys are involved and they are not
-interchangeable:
+Of the six observability skills, every skill except `instrument-agent` reads
+the platform through the Progress Observability MCP server (`instrument-agent`
+only writes instrumentation code and never reads back). Two different keys
+are involved and they are not interchangeable:
 
 | Key | Prefix | Used by |
 |---|---|---|
@@ -60,15 +75,20 @@ key into a chat session.
 
 ```
 skills/<name>/SKILL.md              the skill itself
-skills/<name>/references/           supporting detail, loaded on demand
+skills/<name>/references/           supporting detail, loaded on demand (where present)
+skills/build-*/assets/              bundled agent projects and sample data
+skills/build-*/scripts/             local builder helpers
+skills/build-template-agent/templates.json  prebuilt template catalog
 references/mcp.md                   source of truth for the MCP contract
 references/mcp-schema.json          tool schemas
-scripts/sync_skill_refs.py          copies mcp.md into each skill
+scripts/sync_skill_refs.py          copies mcp.md into the six observability skills
 hooks/pre-commit                    runs the sync check before every commit
 ```
 
-`references/mcp.md` is the single source of truth. The per-skill copies are
-generated and carry a do-not-edit banner. After editing the source:
+For the six observability skills, `references/mcp.md` is the MCP source of truth.
+Their copies are generated and carry a do-not-edit banner. Builder references
+are maintained with the builders and are outside this sync. After editing the
+MCP source:
 
 ```bash
 python scripts/sync_skill_refs.py          # write the copies
@@ -86,8 +106,8 @@ git config core.hooksPath hooks
 Skill content has a house style — see [STYLE.md](STYLE.md). It is short, and
 every rule in it is there because the mistake kept recurring.
 
-Two things here are consumed by name from the plugin repo, so changing them is
-a breaking change rather than a rename:
+For the six observability skills, two things are consumed by name from the
+plugin repo, so changing them is a breaking change rather than a rename:
 
 - **Skill directory names** — slash commands and Copilot prompts refer to them
   as strings.
@@ -95,11 +115,11 @@ a breaking change rather than a rename:
   decide when a skill applies. Editing it changes trigger behaviour for every
   consumer.
 
-Skill changes are verified end-to-end against the live platform before they
-reach anyone: the plugin repo runs `instrument-agent` against real
-uninstrumented fixtures in Python, TypeScript, and .NET, executes the result,
-and asserts the spans arrive. That harness and its credentials stay in the
-plugin repo.
+Changes to the six observability skills are verified end-to-end against the
+live platform before they reach anyone: the plugin repo runs `instrument-agent`
+against real uninstrumented fixtures in Python, TypeScript, and .NET, executes
+the result, and asserts the spans arrive. That harness and its credentials stay
+in the plugin repo.
 
 ## Licence
 
