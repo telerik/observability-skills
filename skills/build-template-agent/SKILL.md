@@ -1,0 +1,127 @@
+---
+name: build-template-agent
+description: "Copy, build, smoke-test, and run a finished .NET 10 agent template: Release Evidence Reviewer, Docs Q&A, Operations Data Analyst, or Ticket Triage. Use for ready/prebuilt agents, not custom generation or existing apps."
+---
+
+# Build a ready agent template
+
+Copy the selected finished asset without generating or customizing source.
+This workflow writes one new project folder.
+
+Use the bundled `templates.json` in this skill directory for the exact IDs,
+project filenames, and three smoke-case IDs. A platform handoff supplies the
+selected template ID:
+
+| ID | Data and experience |
+|---|---|
+| `release-evidence-reviewer` | Markdown release evidence; contextual review chat and New review |
+| `docs-qa` | Markdown Q&A; source-scoped questions and follow-ups (local lexical RAG) |
+| `operations-data-analyst` | Mock CSV; ask questions, inspect KPIs, and change the dashboard view |
+| `ticket-triage` | JSON inbox and Markdown policy; questions and temporary intake scenarios |
+
+Honor the requested ID or unambiguous display name. An explicitly unknown
+template is an error, not a request to invent one. If no template is specified,
+preserve the `release-evidence-reviewer` default. The default target is `./<id>`.
+Do not ask domain/design questions or route to the custom builder.
+
+## Workflow
+
+1. Require the .NET 10 SDK. Locate this skill's own directory and read the
+   selected catalog entry. Run its package-free .NET file-based helper:
+
+   ```bash
+   dotnet run --file <skill-directory>/scripts/copy-template.cs -- --template <id> --target <target>
+   ```
+
+   The copier accepts only a missing target or a real empty directory. It must
+   succeed before continuing. Do not work around a refusal, overwrite content,
+   or reconstruct the asset from memory. This customer workflow does not
+   require Python. `--list` prints the catalog without creating a project.
+
+2. Resolve the copied project directory to an absolute path (`<absolute-target>`).
+   Run `dotnet build "<absolute-target>/<catalog-project>"`. Do not modify the
+   copied source to make the build pass; report an asset defect if the unchanged
+   template fails.
+
+3. Never source or copy a parent `.env`. The app reads local settings from .NET
+   user-secrets as documented in the copied README. Run all three local cases
+   with `dotnet run --project "<absolute-target>/<catalog-project>" -- --smoke`.
+   Parse the single-line `SMOKE_REPORT=<json>` marker and require overall `pass` plus exactly the
+   three passing case IDs from the selected catalog entry. Do not accept
+   skipped tests, another template's cases, or a report from an earlier run.
+
+   Preserve each exact trace ID emitted by the runner. Azure OpenAI settings
+   (`AzureOpenAI:Endpoint`, `AzureOpenAI:Deployment`, and the optional
+   `AzureOpenAI:ApiKey` when local Azure identity is not used) and
+   `Progress:Observability:ApiKey` (an **Integration** credential) are app
+   inputs. If configuration is missing, name only the missing keys and point to
+   the copied README's user-secrets commands; never request, inspect, or print
+   credential values. Let the app report missing configuration: do not run
+   `dotnet user-secrets list`, read secret-store files, or dump the environment
+   as a prerequisite check.
+   Mock data describes bundled business fixtures, not a mock model: smoke cases
+   and UI actions call configured Azure OpenAI. A successful run used available
+   app configuration; never infer that credentials or model access are unnecessary.
+
+   Preserve the bundled tracing setup: Progress exports agent/chat
+   `UseOpenTelemetry` spans, with tool executions under their agent invocation.
+   Tool-only responses may have empty Output text; their structured calls are
+   recorded by the SDK.
+   `Progress:Observability:RecordInputs` and `Progress:Observability:RecordOutputs`
+   default to `true`. Setting either flag to `false` disables both directions
+   of agent/chat/tool content; use the README's process-specific overrides when
+   requested. SDK exception text remains outside these switches.
+
+4. Start the already-built web app on an OS-assigned loopback port. Use the
+   same absolute target so this command works from any working directory:
+
+   ```bash
+   dotnet run --project "<absolute-target>/<catalog-project>" --no-build -- --urls http://127.0.0.1:0
+   ```
+
+   Keep that process running and actively read its own standard
+   `Now listening on: http://127.0.0.1:<port>` line. Use the host's persistent
+   terminal or background-process mechanism with readable stdout and stderr.
+   Once launched, immediately read that process's output in the same turn
+   unless the URL is already present. Use short bounded reads for at most 30
+   seconds total and stop if the process exits. Do not wait for the server
+   command to complete, because a healthy server remains running, and do not
+   end the turn with a passive "Waiting..." status. If process output is not
+   directly readable, use one combined launch log beside the requested target,
+   never a shared `/tmp` filename. Disclose if the process cannot outlive the
+   session.
+
+   Verify `/api/health` only at the exact reported URL. Never guess, scan, or
+   reuse a default or nearby port. A process exit or missing listening line at
+   the deadline fails the health gate. Never start a replacement because an
+   output read was incomplete, and never restart an already healthy process.
+   Require HTTP 200 with `status=ready` from `/api/health` and HTTP 200 from `/`;
+   a degraded health response is not a pass. Read HTTP results directly without
+   creating health-check files (for example, `curl --fail --silent --show-error
+   <actual-url>/api/health`). If browser tools are available,
+   also exercise the selected page's main action and inspect its result/error
+   state. Never claim a browser interaction was checked when only HTTP was used.
+
+5. Return exactly one Progress Observability **Tracing page** link:
+   `https://observability.progress.com/observations`. Do not resolve, construct,
+   or list per-trace deep links.
+
+Report success only after copy, build, all three smoke cases, and UI health pass.
+Return the absolute project path, verified local UI link, one Progress
+Observability Tracing page link, and the three smoke-case results with their
+emitted trace IDs. Those IDs are local execution evidence; this workflow does
+not verify backend ingestion. State explicitly that backend trace ingestion is
+not independently verified by this workflow. On a failure, report the failed
+gate and the smallest safe retry; do not claim the template is ready.
+
+Append this note verbatim to the successful handoff:
+
+> **Development use only:** This agent is in a local development environment. .NET user-secrets stores credentials unencrypted in a JSON file in your user profile. For production deployment, inject credentials through environment variables backed by your deployment’s secret manager.
+> If you used user-secrets or entered credentials directly in terminal commands, I can guide you through removing the saved development credentials and relevant shell-history entries when you finish testing.
+
+Keep the cleanup offer conditional: a successful run does not establish that
+user-secrets were used. Do not inspect secret-store contents or shell history
+to decide. Perform cleanup only when requested, after testing; explain that
+`Progress.AgentBuilder.Mvp` is shared across all five agents before removing
+settings. Refer to the copied README for targeted removal and shell-specific
+guidance; do not automatically clear the store or unrelated shell history.
