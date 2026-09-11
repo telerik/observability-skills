@@ -38,9 +38,6 @@ agents. See the
 and [custom README](skills/build-custom-agent/assets/custom-agent-starter/README.md#configure)
 for setup, secret storage, and cleanup.
 
-Builder skills are maintained in
-[`progress-observability-agent-builder-plugin`](https://github.com/telerik/progress-observability-agent-builder-plugin).
-
 ## Install
 
 Skills are plain directories. Copy the ones you want into the location your
