@@ -4,6 +4,12 @@ using System.Text.RegularExpressions;
 
 return ProjectValidator.Run(args);
 
+/// <summary>
+/// Checks a generated custom agent before build and after the smoke run: fixed starter files unchanged, only allowed
+/// files and settings, declared content and approved hosts, and smoke expectations. With --smoke-baseline it also
+/// checks that the smoke cases and approved hosts still match the snapshot saved before the first smoke. It does not
+/// analyze editable C#. Prints VALIDATION_OK, or the first problem found with exit code 2.
+/// </summary>
 static class ProjectValidator
 {
     private const string Usage = "Usage: dotnet run --file validate-project.cs -- [--target <directory>] [--smoke-baseline <appsettings-snapshot>]";
@@ -15,13 +21,16 @@ static class ProjectValidator
     {
         ".gitignore",
         "AgentRuntime.cs",
+        "Capabilities.cs",
         "ChatHistory.cs",
         "CustomAgent.csproj",
         "KnowledgeBase.cs",
         "Program.cs",
         "README.md",
         "SmokeRunner.cs",
+        "wwwroot/app.js",
         "wwwroot/index.html",
+        "wwwroot/styles.css",
     };
 
     private static readonly HashSet<string> RequiredEditableFiles = new(StringComparer.Ordinal)
@@ -194,8 +203,9 @@ static class ProjectValidator
             contentBytes += length;
         }
 
-        if (contentCount is < 1 or > MaxContentFiles)
-            throw new InvalidDataException($"Local content must contain 1 to {MaxContentFiles} files.");
+        // Content is optional: an agent whose tools only compute or read approved hosts declares none.
+        if (contentCount > MaxContentFiles)
+            throw new InvalidDataException($"Local content may contain at most {MaxContentFiles} files.");
         if (contentBytes > MaxContentTotalBytes)
             throw new InvalidDataException("Local content exceeds the 5 MiB total limit.");
         return new ContentSummary(contentCount, contentBytes);
@@ -251,7 +261,7 @@ static class ProjectValidator
         using var assetDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(asset, "appsettings.json")));
         var root = targetDocument.RootElement;
         ValidateJsonSourceReferences(root, files);
-        RequireObjectProperties(root, "root", "Urls", "AzureOpenAI", "Content", "Agent", "Smoke");
+        RequireObjectProperties(root, "root", "Urls", "AzureOpenAI", "Content", "Capabilities", "Agent", "Smoke");
 
         var expectedUrls = RequireString(assetDocument.RootElement, "Urls", 200);
         if (!string.Equals(RequireString(root, "Urls", 200), expectedUrls, StringComparison.Ordinal))
@@ -264,8 +274,11 @@ static class ProjectValidator
         if (!string.Equals(RequireString(azure, "Deployment", 100), expectedDeployment, StringComparison.Ordinal))
             throw new InvalidDataException("AzureOpenAI:Deployment is fixed in this MVP.");
 
-        ValidateContentSources(root, files);
+        var hasContent = ValidateContentSources(root, files) > 0;
+        var capabilities = ValidateCapabilities(root);
 
+        // App startup checks the Agent values (AgentDefinition.Load, AgentPresentation.Load); this only rejects
+        // missing or invented settings.
         var agent = RequireObject(root, "Agent");
         RequireObjectProperties(
             agent,
@@ -276,20 +289,12 @@ static class ProjectValidator
             "Ui",
             "Instructions",
             "Examples");
-        RequireString(agent, "DisplayName", 80);
-        var slug = RequireString(agent, "ServiceSlug", 64);
-        if (!Regex.IsMatch(slug, "^[a-z0-9]+(?:-[a-z0-9]+)*$", RegexOptions.CultureInvariant))
-            throw new InvalidDataException("Agent:ServiceSlug must be a lowercase-hyphen slug.");
-        RequireString(agent, "Purpose", 500);
-        var ui = RequireObject(agent, "Ui");
-        RequireObjectProperties(ui, "Agent:Ui", "Preset", "InputPlaceholder");
-        var preset = RequireString(ui, "Preset", 20);
-        if (preset is not ("knowledge" or "review" or "workflow" or "analysis"))
-            throw new InvalidDataException("Agent:Ui:Preset must be knowledge, review, workflow, or analysis.");
-        RequireString(ui, "InputPlaceholder", 140);
-        RequireString(agent, "Instructions", 4_000);
-        ValidateStringArray(RequireArray(agent, "Examples"), "Agent:Examples", 1, 4, 500);
+        RequireObjectProperties(RequireObject(agent, "Ui"), "Agent:Ui", "Preset", "InputPlaceholder");
+        var instructions = agent.GetProperty("Instructions") is { ValueKind: JsonValueKind.String } value
+            ? value.GetString()!
+            : "";
 
+        // SmokeRunner repeats the format checks, but the Smoke section must be valid before the baseline is saved.
         var smoke = RequireObject(root, "Smoke");
         RequireObjectProperties(smoke, "Smoke", "Cases");
         var cases = RequireArray(smoke, "Cases").EnumerateArray().ToArray();
@@ -304,19 +309,35 @@ static class ProjectValidator
             RequireObjectProperties(smokeCase, $"Smoke:Cases:{index}", "Id", "Prompt", "ExpectedMarkers");
             if (!string.Equals(RequireString(smokeCase, "Id", 32), expectedIds[index], StringComparison.Ordinal))
                 throw new InvalidDataException("Smoke case IDs must be knowledge, tool, and not-found in that order.");
-            RequireString(smokeCase, "Prompt", 4_000);
+            var prompt = RequireString(smokeCase, "Prompt", 4_000);
             var markers = ValidateStringArray(
                 RequireArray(smokeCase, "ExpectedMarkers"),
                 $"Smoke:Cases:{index}:ExpectedMarkers",
                 1,
                 4,
                 120);
-            ValidateSmokeMarkers(expectedIds[index], markers);
+            ValidateSmokeMarkers(expectedIds[index], markers, prompt, instructions, hasContent);
         }
-        if (smokeBaseline is not null) ValidateSmokeBaseline(target, smoke, smokeBaseline);
+        if (smokeBaseline is not null) ValidateSmokeBaseline(target, smoke, capabilities, smokeBaseline);
     }
 
-    private static void ValidateContentSources(
+    private static JsonElement ValidateCapabilities(JsonElement root)
+    {
+        // Startup repeats these checks (Capabilities.Load), but the approved hosts are frozen with the smoke
+        // baseline, so a malformed declaration must be caught before that snapshot is saved.
+        var capabilities = RequireObject(root, "Capabilities");
+        RequireObjectProperties(capabilities, "Capabilities", "Network");
+        var network = RequireObject(capabilities, "Network");
+        RequireObjectProperties(network, "Capabilities:Network", "AllowedHosts");
+        var hosts = ValidateStringArray(RequireArray(network, "AllowedHosts"), "Capabilities:Network:AllowedHosts", 0, 5, 253);
+        if (hosts.Any(host => Uri.CheckHostName(host) is not (UriHostNameType.Dns or UriHostNameType.IPv4)))
+            throw new InvalidDataException("Capabilities:Network:AllowedHosts entries must be host names without scheme, port or path.");
+        if (hosts.Distinct(StringComparer.OrdinalIgnoreCase).Count() != hosts.Length)
+            throw new InvalidDataException("Capabilities:Network:AllowedHosts must not repeat a host.");
+        return capabilities;
+    }
+
+    private static int ValidateContentSources(
         JsonElement root,
         IReadOnlyDictionary<string, string> files)
     {
@@ -341,11 +362,13 @@ static class ProjectValidator
         }
 
         var actual = files.Keys.Where(IsSupportedContent).ToHashSet(StringComparer.Ordinal);
-        if (declared.Count is < 1 or > MaxContentFiles || !declared.SetEquals(actual))
+        if (declared.Count > MaxContentFiles || !declared.SetEquals(actual))
             throw new InvalidDataException("Content:Sources must declare every local content file exactly once.");
+        return declared.Count;
     }
 
-    private static void ValidateSmokeBaseline(string target, JsonElement smoke, string baselineArgument)
+    private static void ValidateSmokeBaseline(
+        string target, JsonElement smoke, JsonElement capabilities, string baselineArgument)
     {
         var baseline = Path.GetFullPath(baselineArgument);
         if (IsWithin(target, baseline))
@@ -356,25 +379,40 @@ static class ProjectValidator
         using var document = JsonDocument.Parse(File.ReadAllText(baseline));
         if (document.RootElement.ValueKind != JsonValueKind.Object)
             throw new InvalidDataException("Smoke baseline must be an appsettings JSON object.");
-        var expected = RequireObject(document.RootElement, "Smoke");
-        if (!JsonElement.DeepEquals(smoke, expected))
+        // The snapshot freezes both what the smokes expect and which hosts the user approved.
+        if (!JsonElement.DeepEquals(smoke, RequireObject(document.RootElement, "Smoke")))
             throw new InvalidDataException(
                 "Smoke expectations changed after the baseline was captured. Restore the original Smoke section; do not replace the baseline to make tests pass.");
+        if (!JsonElement.DeepEquals(capabilities, RequireObject(document.RootElement, "Capabilities")))
+            throw new InvalidDataException(
+                "Approved capabilities changed after the baseline was captured. Restore the original Capabilities section; a new host needs the user's approval and a new build.");
     }
 
-    private static void ValidateSmokeMarkers(string caseId, IReadOnlyList<string> markers)
+    private static void ValidateSmokeMarkers(
+        string caseId, IReadOnlyList<string> markers, string prompt, string instructions, bool hasContent)
     {
         if (markers.Distinct(StringComparer.OrdinalIgnoreCase).Count() != markers.Count)
             throw new InvalidDataException($"Smoke case '{caseId}' has duplicate expected markers.");
-        if (markers.Any(marker => marker.Length < 2 || !marker.Any(char.IsLetterOrDigit)) ||
-            !markers.Any(marker => marker.Length >= 4))
-            throw new InvalidDataException($"Smoke case '{caseId}' needs meaningful answer fragments: at least two characters each, with at least one longer fact or source path (four or more characters).");
+        if (markers.Any(marker => marker.Length < 2 || !marker.Any(char.IsLetterOrDigit)))
+            throw new InvalidDataException($"Smoke case '{caseId}' needs meaningful answer fragments of at least two characters each.");
+        // A marker copied from the prompt or given in the instructions shows nothing the agent looked up. The not-found
+        // sentence may appear in instructions: the fixed response policy already tells the model to say it.
+        var checkInstructions = caseId != "not-found";
+        if (!markers.Any(marker => marker.Length >= 4 &&
+                                   !prompt.Contains(marker, StringComparison.OrdinalIgnoreCase) &&
+                                   !(checkInstructions && instructions.Contains(marker, StringComparison.OrdinalIgnoreCase))))
+        {
+            throw new InvalidDataException(
+                $"Smoke case '{caseId}' needs at least one fact or source path marker (four or more characters) that is not in its prompt" +
+                (checkInstructions ? " or in Agent:Instructions." : "."));
+        }
         if (markers.Any(marker => Regex.IsMatch(marker, @"^(status|mode|source)=", RegexOptions.IgnoreCase)))
             throw new InvalidDataException($"Smoke case '{caseId}' must check plain-text facts or source paths, not internal diagnostic tokens.");
-        if (caseId == "knowledge" && !markers.Any(marker =>
+        // Without declared content, the knowledge case checks a fact from a tool result instead of a source path.
+        if (caseId == "knowledge" && hasContent && !markers.Any(marker =>
                 marker.StartsWith("docs/", StringComparison.OrdinalIgnoreCase) ||
                 marker.StartsWith("data/", StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidDataException("Smoke case 'knowledge' must include a local docs/ or data/ source path marker.");
+            throw new InvalidDataException("Smoke case 'knowledge' must include a docs/ or data/ source path marker when local content is declared.");
     }
 
     private static JsonElement RequireObject(JsonElement parent, string name)

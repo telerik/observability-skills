@@ -42,8 +42,9 @@ dotnet run --no-build -- --urls http://127.0.0.1:0
 ```
 
 Open the actual `Now listening on:` loopback URL printed by the started process.
-The single responsive `wwwroot/index.html` is an inbox/detail/recommendation UI;
-it has no frontend dependencies or separate build. Select a ticket and choose
+The responsive `wwwroot/index.html` is an inbox/detail/recommendation UI, with
+`styles.css` and `app.js` alongside it and no frontend dependencies or separate
+build. Select a ticket and choose
 **Suggest triage**, then **Ask about this ticket** (for example, "Why P1?"). Each
 question is answered from that selected ticket's real tool evidence, not a shared
 chat history. The endpoint returns the deterministic tool result separately
@@ -74,6 +75,25 @@ If credentials were entered in terminal commands, remove those history entries
 in the original shell. In Bash, use `history -d <entry-number>` then `history -w`;
 other open sessions may retain entries.
 
+## Project files
+
+A triage request moves from the page to `POST /api/triage` in `Program.cs`, then
+to `AgentRuntime.cs`, where a Microsoft Agent Framework (MAF) agent calls the
+tools in `Tools.cs` to inspect the selected ticket before it explains the
+policy-derived recommendation.
+
+| Path | What it does |
+|---|---|
+| `Program.cs` | Startup: settings, Azure OpenAI chat client, Progress tracing, HTTP endpoints or `--smoke` |
+| `AgentRuntime.cs` | Triages one ticket: agent instructions, tool loop and limits, and grounding checks on the result |
+| `Tools.cs` | `GetTicket`, `ReadTriagePolicy` and `SuggestTriage`, the tools the model calls, scoped to the selected ticket |
+| `TriageData.cs` | Loads and validates tickets and policy; derives queue, priority and evidence from intake facts |
+| `TriageRequest.cs` | The `/api/triage` request: ticket ID, optional question and temporary scenario |
+| `SmokeRunner.cs` | The three `--smoke` cases |
+| `appsettings.json` | Non-secret defaults: listen URL, deployment name, app name and smoke ticket IDs |
+| `data/tickets.json`, `docs/triage-policy.md` | The bundled mock tickets and triage policy |
+| `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
+
 ## Small, bounded contract
 
 - `GetTicket`, `ReadTriagePolicy`, and `SuggestTriage` are available read-only tools.
@@ -101,28 +121,34 @@ other open sessions may retain entries.
 
 `--smoke` requires the model and Integration-key configuration, runs exactly
 `clear-routing`, `missing-information`, and `unknown-not-found`, and prints one
-`SMOKE_REPORT=<json>` with case status and W3C trace IDs. Assertions check actual
+`SMOKE_REPORT=<json>` with each case's status and reason. Assertions check actual
 tool use and typed decisions/evidence, not only answer wording. Each case is a
 real model run; local deterministic/scripted tests do not prove this live execution.
-Emitted trace IDs do not independently prove backend ingestion: confirm them in
-[Progress Tracing](https://observability.progress.com/observations).
+A passing smoke is not proof of backend ingestion: find the service, template tag,
+time and matching ticket on the
+[Progress Tracing page](https://observability.progress.com/observations).
 
-Tracing uses the Progress SDK exporter with agent/chat `UseOpenTelemetry`
-instrumentation ([SDK documentation](https://www.telerik.com/ai-observability-platform/documentation/sdk/dotnet#iagent)).
-One agent span contains the model requests and real tool executions in order.
-The SDK captures agent input/output and tool arguments/results automatically.
-Static template identifiers use `AdditionalTags` for filtering.
+HTTP error responses expose only allowlisted internal reason codes, never raw
+provider exceptions or credential values.
+The bundled policy is illustrative, not a production SLA. Add real intake,
+authentication, and reviewed operational policy separately before production use.
+
+## Tracing
+
+When `Progress:Observability:ApiKey` is configured, each triage request appears in
+Progress Observability as one trace with the agent run, its model calls and its
+tool calls. `Program.cs` adds the Progress SDK through one `AddObservability()`
+wrapper on the chat client, and `AgentRuntime.cs` adds `AddToolObservability()`
+to record tool arguments and results
+([SDK documentation](https://www.telerik.com/ai-observability-platform/documentation/sdk/dotnet)).
+Adding `UseOpenTelemetry()` as well would duplicate spans. Every span carries the
+`agent.template.id:ticket-triage` tag for filtering.
 
 `Progress:Observability:RecordInputs` and `Progress:Observability:RecordOutputs`
-default to `true` for the local demo. SDK capture has one combined switch:
-**setting either flag to false disables both input and output content**. The
-health response reports the effective `telemetryRecordContent` value.
-
-Model responses containing only tool calls can have an empty Output text panel.
-The SDK records the structured calls under Tool Calls; the templates add no
-synthetic output text.
-
-To disable content recording for one run:
+default to `true` for the local demo. They act as one switch: **setting either
+flag to false disables all recorded content**, meaning prompts, answers, tool
+arguments and tool results. The health response reports the effective
+`telemetryRecordContent` value. To disable content recording for one run:
 
 ```bash
 PROGRESS__OBSERVABILITY__RECORDINPUTS=false \
@@ -130,13 +156,21 @@ PROGRESS__OBSERVABILITY__RECORDOUTPUTS=false \
 dotnet run --no-build -- --urls http://127.0.0.1:0
 ```
 
-The overrides do not persist. SDK message/tool payloads have no additional
-template truncation. SDK exception text remains outside these content switches.
-The agent's Tool Results panel may remain empty even when results exist in its
-raw output messages. Agent aggregate tokens also repeat model-call usage, so use
-individual model spans when inspecting consumption.
+The overrides do not persist. The template does not truncate recorded content,
+and SDK exception text is not covered by these flags.
 
-HTTP error responses expose only allowlisted internal reason codes and a trace
-ID, never raw provider exceptions or credential values.
-The bundled policy is illustrative, not a production SLA. Add real intake,
-authentication, and reviewed operational policy separately before production use.
+Reading traces with Progress SDK 1.4.0:
+
+- `AgentRuntime` clears `Activity.Current` for each run and restores it
+  afterwards, because the SDK does not emit its automatic tool spans under the
+  ASP.NET request activity. The Progress trace is therefore not linked to the
+  HTTP request trace.
+- Each tool runs once but appears as two spans: the SDK's automatic span under
+  the `orchestrate_tools` root, with metadata only, and the
+  `AddToolObservability()` span under the agent, with arguments and results.
+  That wrapper ignores the record flags, so `AgentRuntime` adds it only when
+  content recording is enabled.
+- Parent spans repeat model-call token usage, so the trace token total is higher
+  than actual usage. Use the individual model-call spans to inspect consumption.
+- A model call that only requests tools shows an empty Output text panel; the
+  requested calls appear under Tool Calls.

@@ -2,6 +2,11 @@ using System.Runtime.CompilerServices;
 
 return TemplateCopier.Run(args);
 
+/// <summary>
+/// Copies the custom-agent starter into a missing or empty target folder (custom-agent by default) and prints the
+/// created path. The copy is built in a staging folder beside the target and then moved into place. bin, obj, .git
+/// and .env files are left out; links, the current directory and targets inside the starter are refused (exit code 2).
+/// </summary>
 static class TemplateCopier
 {
     private static readonly HashSet<string> ExcludedNames = new(StringComparer.Ordinal)

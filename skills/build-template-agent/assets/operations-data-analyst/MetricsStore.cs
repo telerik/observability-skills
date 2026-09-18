@@ -3,13 +3,16 @@ using System.Security.Cryptography;
 
 namespace OperationsDataAnalyst;
 
+/// <summary>
+/// Loads the synthetic CSV (date,service,requests,errors,total_response_ms) once at startup and calculates every
+/// number the app shows: request-weighted summaries, period comparisons and outliers. SourcePath and Fingerprint
+/// identify the exact file every answer is computed from, so a stale copy is visible at a glance.
+/// </summary>
 public class MetricsStore
 {
     private readonly MetricRow[] _rows;
     public IReadOnlyList<string> Services { get; }
-    /// <summary>Absolute path of the CSV every answer is computed from.</summary>
     public string? SourcePath { get; private init; }
-    /// <summary>Content fingerprint of that CSV, so a stale copy is visible at a glance.</summary>
     public string? Fingerprint { get; private init; }
     public DateOnly Start { get; }
     public DateOnly End { get; }
@@ -17,6 +20,8 @@ public class MetricsStore
 
     public MetricsStore(IEnumerable<string> lines)
     {
+        // Reject malformed or oversized data instead of guessing: exact header, bounded rows, valid dates and
+        // services, errors not above requests, and one row per day and service.
         using var input = lines.GetEnumerator();
         if (!input.MoveNext() || input.Current.TrimStart('\uFEFF') != "date,service,requests,errors,total_response_ms")
             throw new InvalidDataException("csv_header_invalid");
@@ -106,6 +111,8 @@ public class MetricsStore
         var selection = Select(service, start, end);
         if (selection.Reason is not null) return new("invalid", selection.Reason, []);
         if (selection.Rows.Length == 0) return new("empty", "no_matching_rows", []);
+        // A day is an outlier when its rate or response time is at least twice the median of the other days and rises
+        // by a minimum amount; a service needs at least three days with requests.
         var outliers = new List<Outlier>();
         foreach (var group in selection.Rows.GroupBy(row => row.Service))
         {
@@ -139,6 +146,7 @@ public class MetricsStore
 
     public static MetricSummary Aggregate(IEnumerable<MetricRow> rows)
     {
+        // Rates and averages are request-weighted over all rows, never means of daily means; zero requests stay null.
         var values = rows.ToArray();
         var requests = values.Sum(row => row.Requests);
         var errors = values.Sum(row => row.Errors);

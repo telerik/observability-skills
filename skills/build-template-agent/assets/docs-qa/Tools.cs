@@ -3,7 +3,11 @@ using System.Text.Json;
 
 namespace DocsQa;
 
-// One instance per question. Citation IDs must be discovered by search, then read.
+/// <summary>
+/// The tools the model can call, registered in AgentRuntime. The model chooses a tool and its
+/// arguments from the [Description] text. One instance per question: a source becomes a citation
+/// only after SearchDocuments found it and ReadSection read it.
+/// </summary>
 public class DocumentTools(DocumentStore store, string? sourceId = null)
 {
     public const int MaxToolCalls = 6;
@@ -34,23 +38,26 @@ public class DocumentTools(DocumentStore store, string? sourceId = null)
         var section = store.Read(sourceId);
         if (section is null || !_retrieved.Contains(sourceId))
             return "{\"status\":\"not_found\",\"reason\":\"source_not_retrieved\"}";
+        // Only successful reads become citations displayed with the answer.
         _citations.TryAdd(section.SourceId, section);
         return JsonSerializer.Serialize(new { status = "found", section });
     }
 
-    public AgentReply Complete(string answer, string traceId)
+    public AgentReply Complete(string answer)
     {
+        // Called by AgentRuntime after the model finishes. The model's answer is used only if a search ran
+        // and a section it found was read. If no search found anything, a fixed not-found reply is returned.
         if (!_calls.Contains(nameof(SearchDocuments))) throw new InvalidOperationException("retrieval_required");
         if (_citations.Count == 0)
         {
             if (HasMatches) throw new InvalidOperationException("source_read_required");
             return new("not_found", _sourceId is null
                 ? "No matching information was found in the bundled documents. Try a question about workspaces, exports, audit history or support."
-                : "No matching information was found in the selected section. Clear the source scope to search all bundled documents.", [], Calls, traceId);
+                : "No matching information was found in the selected section. Clear the source scope to search all bundled documents.", [], Calls);
         }
         if (string.IsNullOrWhiteSpace(answer)) throw new InvalidOperationException("empty_agent_response");
         if (answer.Length > MaxAnswerChars) throw new InvalidOperationException("answer_too_long");
-        return new("answered", answer.Trim(), Citations, Calls, traceId);
+        return new("answered", answer.Trim(), Citations, Calls);
     }
 
     private void RecordCall(string name)
@@ -60,4 +67,4 @@ public class DocumentTools(DocumentStore store, string? sourceId = null)
     }
 }
 
-public sealed record AgentReply(string Status, string Answer, IReadOnlyList<DocumentSection> Citations, IReadOnlyList<string> ToolCalls, string TraceId);
+public sealed record AgentReply(string Status, string Answer, IReadOnlyList<DocumentSection> Citations, IReadOnlyList<string> ToolCalls);

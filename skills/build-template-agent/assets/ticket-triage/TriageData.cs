@@ -3,15 +3,10 @@ using System.Text.Json.Serialization;
 
 namespace TicketTriage;
 
-public sealed record Ticket(string Id, string Title, string Description, string? IssueType,
-    string? Environment, string? Impact, bool? WorkaroundAvailable);
-public sealed record Evidence(string Field, string Value, string Source);
-public sealed record Recommendation(string Status, string TicketId, string? SuggestedQueue,
-    string? SuggestedPriority, IReadOnlyList<Evidence> Evidence,
-    IReadOnlyList<string> MissingFields, IReadOnlyList<string> PolicyRefs);
-public sealed record TicketLookup(string Status, Ticket? Ticket, string? Source);
-public sealed record PolicyDocument(string Source, string Markdown);
-
+/// <summary>
+/// Loads the bundled mock tickets (data/tickets.json) and triage policy (docs/triage-policy.md), and derives each
+/// queue and priority from structured intake facts only, never from ticket titles, descriptions or model output.
+/// </summary>
 public class TicketStore
 {
     private static readonly string[] RuleIds =
@@ -38,6 +33,7 @@ public class TicketStore
 
     public static TicketStore Parse(string json, string policy)
     {
+        // Every rule the recommendations cite must exist as a ## heading in the policy.
         policy = policy.Replace("\r\n", "\n", StringComparison.Ordinal);
         if (string.IsNullOrWhiteSpace(policy) ||
             RuleIds.Any(rule => !policy.Contains($"## {rule}\n", StringComparison.Ordinal)))
@@ -46,6 +42,7 @@ public class TicketStore
         Ticket[] tickets;
         try
         {
+            // Unknown or duplicate fields make the fixture invalid instead of being silently ignored.
             tickets = JsonSerializer.Deserialize<Ticket[]>(json, new JsonSerializerOptions
             {
                 PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -82,9 +79,9 @@ public class TicketStore
             ? new("found", ticket, $"tickets.json#{ticket.Id}")
             : new("not_found", null, null);
 
-    // A request-local view. The original store and fixture records are never modified.
     public TicketStore WithScenario(string id, IReadOnlyDictionary<string, JsonElement>? values)
     {
+        // Build a request-local copy with the supplied facts; the original store and fixture never change.
         if (values is null || values.Count == 0) return this;
         var original = GetTicket(id).Ticket ?? throw new ArgumentException("scenario_requires_known_ticket");
         if (values.Count > 4) throw new ArgumentException("scenario_fields_invalid");
@@ -104,6 +101,7 @@ public class TicketStore
             };
             supplied.Add(new(field, text ?? value.GetBoolean().ToString().ToLowerInvariant(), $"temporary-scenario#{original.Id}"));
         }
+        // A scenario may only fill facts that are missing and required by the effective issue type.
         foreach (var field in values.Keys)
         {
             var permitted = field switch
@@ -126,6 +124,7 @@ public class TicketStore
         if (lookup.Ticket is not { } ticket)
             return new("not_found", id.Trim(), null, null, [], [], []);
 
+        // Each evidence fact names its source: the bundled ticket or the temporary scenario.
         var evidence = new List<Evidence>();
         void Fact(string field, string? value)
         {
@@ -142,6 +141,7 @@ public class TicketStore
                 Fact("workaroundAvailable", ticket.WorkaroundAvailable?.ToString().ToLowerInvariant());
         }
 
+        // Missing required facts stop the decision: needs_information never guesses a queue or priority.
         var missing = new List<string>();
         if (ticket.IssueType is null) missing.Add("issueType");
         if (ticket.IssueType is "outage" or "defect")
@@ -155,6 +155,7 @@ public class TicketStore
             return new("needs_information", ticket.Id, null, null, evidence, missing,
                 ["triage-policy#required-fields"]);
 
+        // Complete facts map to a queue, a priority and the policy rule that justifies them.
         var (queue, priority, rule) = ticket.IssueType switch
         {
             "howto" => ("Product Support", "P3", "how-to"),
@@ -169,3 +170,12 @@ public class TicketStore
         return new("proposed", ticket.Id, queue, priority, evidence, [], [$"triage-policy#{rule}"]);
     }
 }
+
+public sealed record Ticket(string Id, string Title, string Description, string? IssueType,
+    string? Environment, string? Impact, bool? WorkaroundAvailable);
+public sealed record Evidence(string Field, string Value, string Source);
+public sealed record Recommendation(string Status, string TicketId, string? SuggestedQueue,
+    string? SuggestedPriority, IReadOnlyList<Evidence> Evidence,
+    IReadOnlyList<string> MissingFields, IReadOnlyList<string> PolicyRefs);
+public sealed record TicketLookup(string Status, Ticket? Ticket, string? Source);
+public sealed record PolicyDocument(string Source, string Markdown);

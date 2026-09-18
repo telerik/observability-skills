@@ -27,8 +27,8 @@ All six read the platform over MCP. Each carries its own copy of the contract at
 
 | Skill | What it does |
 |---|---|
-| [`build-template-agent`](skills/build-template-agent/SKILL.md) | Copies, builds, and runs one of four .NET 10 agent templates |
-| [`build-custom-agent`](skills/build-custom-agent/SKILL.md) | Builds a bounded local .NET 10 prototype or returns an integration plan |
+| [`build-template-agent`](skills/build-template-agent/SKILL.md) | Copies one of four finished .NET 10 templates, builds it, runs three smoke cases, and leaves its local UI running |
+| [`build-custom-agent`](skills/build-custom-agent/SKILL.md) | Turns an approved purpose into a bounded local .NET 10 prototype or a no-write integration plan |
 
 Copy each complete skill directory using the install steps below. Both builders
 require .NET 10, Azure OpenAI configuration, and a Progress Observability
@@ -37,6 +37,24 @@ agents. See the
 [template README](skills/build-template-agent/assets/release-evidence-reviewer/README.md#configure)
 and [custom README](skills/build-custom-agent/assets/custom-agent-starter/README.md#configure)
 for setup, secret storage, and cleanup.
+
+Use a capable coding agent with file and terminal access. Custom builds require
+an interactive session that can pause for scope approval.
+
+Run `/build-template-agent docs-qa` to select Docs Q&A, or omit the ID for Release
+Evidence Reviewer. The [template catalog](skills/build-template-agent/templates.json)
+also includes Operations Data Analyst and Ticket Triage.
+
+Run `/build-custom-agent` with a short purpose and approve the proposed scope.
+Business-system integrations use declared mock fixtures and a future integration
+plan. A custom tool may read a public HTTPS API without credentials after you
+approve its host. Smoke tests and UI actions call your configured Azure OpenAI
+deployment and send telemetry to Progress Observability; mock data does not mean
+a mock model. Backend trace ingestion requires separate confirmation.
+
+After a successful custom build, you can opt into
+[try-and-refine](skills/build-custom-agent/references/try-and-refine.md) for four
+additional chat checks and at most one bounded repair.
 
 ## Install
 

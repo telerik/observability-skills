@@ -6,6 +6,9 @@ using Progress.Observability.Extensions.AI;
 
 namespace ReleaseEvidenceReviewer;
 
+/// <summary>
+/// Startup: load settings -> create the model client -> enable tracing -> run HTTP endpoints or smoke cases.
+/// </summary>
 public static class Program
 {
     public static async Task<int> Main(string[] args)
@@ -18,8 +21,8 @@ public static class Program
             WebRootPath = "wwwroot",
         });
 
-        // Standard .NET precedence: appsettings.json -> user secrets -> environment.
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 256 * 1_024);
+        // Local user-secrets supply shared app settings; environment variables can override them.
         builder.Configuration
             .AddUserSecrets<AgentMarker>(optional: true)
             .AddEnvironmentVariables();
@@ -41,7 +44,7 @@ public static class Program
         var tracingEnabled = !string.IsNullOrWhiteSpace(observabilityKey);
         var telemetryRecordInputs = builder.Configuration.GetValue("Progress:Observability:RecordInputs", true);
         var telemetryRecordOutputs = builder.Configuration.GetValue("Progress:Observability:RecordOutputs", true);
-        // SDK capture is combined: either opt-out disables both directions.
+        // One combined switch: if either flag is false, no prompts, answers or tool payloads are recorded.
         var telemetryRecordContent = telemetryRecordInputs && telemetryRecordOutputs;
 
         if (smokeMode && !tracingEnabled)
@@ -59,27 +62,39 @@ public static class Program
 
         try
         {
-            var knowledgeBase = new KnowledgeBase("docs");
+            var knowledgeBase = KnowledgeBase.Load("docs");
+            var azureOptions = new AzureOpenAIClientOptions();
+            // Smoke tests should surface the first Azure error before retries consume the deadline.
+            if (smokeMode)
+                azureOptions.RetryPolicy = new System.ClientModel.Primitives.ClientRetryPolicy(0);
             var azureClient = string.IsNullOrWhiteSpace(azureKey)
-                ? new AzureOpenAIClient(azureEndpoint, new DefaultAzureCredential())
-                : new AzureOpenAIClient(azureEndpoint, new AzureKeyCredential(azureKey));
+                ? new AzureOpenAIClient(azureEndpoint, new DefaultAzureCredential(), azureOptions)
+                : new AzureOpenAIClient(azureEndpoint, new AzureKeyCredential(azureKey), azureOptions);
 
+            // IChatClient is the model interface MAF uses; here it wraps the Azure OpenAI deployment.
             IChatClient chatClient = azureClient.GetChatClient(deployment).AsIChatClient();
             if (tracingEnabled)
             {
+                // Configure export to Progress; template tags help find these traces in the Observability UI.
                 ObservabilityTracer.Initialize(new ObservabilityOptions
                 {
                     AppName = appName,
                     ApiKey = observabilityKey!,
                     AdditionalTags = ["agent.template.id:release-evidence-reviewer"],
                 });
-                chatClient = chatClient.AsBuilder().UseOpenTelemetry(
-                    sourceName: ObservabilityTracer.SourceName,
-                    configure: tracing => tracing.EnableSensitiveData = telemetryRecordContent).Build();
+                // Trace the agent run, model calls and tool calls; AgentRuntime adds tool arguments and results.
+                chatClient = chatClient.AddObservability(options =>
+                {
+                    options.AppName = appName;
+                    options.RecordInputs = telemetryRecordContent;
+                    options.RecordOutputs = telemetryRecordContent;
+                });
             }
             using var chatClientLifetime = chatClient;
 
-            var runtime = new AgentRuntime(chatClient, knowledgeBase, appName, tracingEnabled: tracingEnabled, recordContent: telemetryRecordContent);
+            // Web requests and smoke checks exercise the same agent runtime.
+            var runtime = new AgentRuntime(chatClient, knowledgeBase, appName,
+                recordToolContent: tracingEnabled && telemetryRecordContent);
 
             if (smokeMode)
                 return await new SmokeRunner(runtime, builder.Configuration).RunAsync();
@@ -96,6 +111,7 @@ public static class Program
                 telemetryRecordContent,
             }));
 
+            // The page posts a message with optional review context; return the answer, project, tools and verdict.
             app.MapPost("/api/chat", async (
                 ChatRequest? request,
                 CancellationToken cancellationToken) =>
@@ -106,12 +122,12 @@ public static class Program
 
                 try
                 {
-                    return Results.Ok(await runtime.RunAsync(message, "chat", cancellationToken, request?.Context));
+                    return Results.Ok(await runtime.RunAsync(message, cancellationToken, request?.Context));
                 }
                 catch (AgentRunException ex)
                 {
                     return Results.Json(
-                        new { error = ex.Code, traceId = ex.TraceId },
+                        new { error = ex.Code },
                         statusCode: ex.Code == "agent_deadline_exceeded" ? 504 : 502);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -128,6 +144,7 @@ public static class Program
         }
         finally
         {
+            // Flush queued spans before exit, including short-lived smoke runs.
             if (tracingEnabled) ObservabilityTracer.Shutdown();
         }
     }

@@ -2,23 +2,30 @@ using System.Diagnostics;
 using System.Text;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
-using Progress.Observability.Extensions.AI;
 
 namespace CustomAgent;
 
+/// <summary>
+/// Runs one chat turn or smoke case on the Microsoft Agent Framework (MAF) agent built in Program.cs and returns its
+/// answer and the registered tools that returned a result. Chat sends its bounded history; smoke cases send one
+/// independent message. ResponsePolicy is the fixed response policy Program.cs appends to the configured instructions.
+/// </summary>
 public class AgentRuntime
 {
     private static readonly TimeSpan DefaultRunTimeout = TimeSpan.FromSeconds(45);
     private const int MaxAnswerCharacters = 8_000;
     private readonly AIAgent _agent;
-    private readonly string _serviceSlug;
+    private readonly HashSet<string> _toolNames;
     private readonly TimeSpan _runTimeout;
 
-    // The optional timeout keeps deadline tests fast; Program uses the 45-second default.
-    public AgentRuntime(AIAgent agent, string serviceSlug, TimeSpan? runTimeout = null)
+    public AgentRuntime(AIAgent agent, TimeSpan? runTimeout = null)
     {
         _agent = agent;
-        _serviceSlug = serviceSlug;
+        // The tools Program.cs registered on the agent; a call to any other name is not counted as tool use.
+        _toolNames = (agent.GetService<ChatOptions>()?.Tools ?? [])
+            .Select(tool => tool.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        // The optional timeout keeps deadline tests fast; Program uses the 45-second default.
         _runTimeout = runTimeout ?? DefaultRunTimeout;
         if (_runTimeout <= TimeSpan.Zero || _runTimeout > DefaultRunTimeout)
             throw new ArgumentOutOfRangeException(nameof(runTimeout), "Run timeout must be positive and at most 45 seconds.");
@@ -44,54 +51,31 @@ public class AgentRuntime
         never claim to have connected to or changed a live business system.
         """;
 
-    // Smoke cases are intentionally independent; chat supplies only its bounded history.
     public Task<AgentReply> RunAsync(
         string message,
-        string operationId,
         CancellationToken cancellationToken = default)
-        => RunAsync([new ChatMessage(ChatRole.User, message)], operationId, cancellationToken);
+        => RunAsync([new ChatMessage(ChatRole.User, message)], cancellationToken);
 
     public async Task<AgentReply> RunAsync(
         IReadOnlyList<ChatMessage> messages,
-        string operationId,
         CancellationToken cancellationToken = default)
     {
-        Activity.DefaultIdFormat = ActivityIdFormat.W3C;
-        Activity.ForceDefaultIdFormat = true;
-
-        var previousActivity = Activity.Current;
-        Activity? activity;
+        var previous = Activity.Current;
         try
         {
-            // Keep one Progress-exported workflow root for UI/smoke correlation.
-            // A trace ID alone is not ingestion proof.
+            // Clearing Activity.Current works around missing tool spans in Progress SDK 1.4.0 under ASP.NET's
+            // HTTP request activity. Remove this reset/restore workaround once the SDK fixes request tracing.
             Activity.Current = null;
-            activity = ObservabilityActivitySource.Instance.StartActivity(
-                $"{_serviceSlug}.{operationId}",
-                ActivityKind.Internal);
-            activity ??= new Activity($"{_serviceSlug}.{operationId}")
-                .SetIdFormat(ActivityIdFormat.W3C)
-                .Start();
-        }
-        catch
-        {
-            Activity.Current = previousActivity;
-            throw;
-        }
 
-        activity.SetTag("observability.span.kind", "workflow");
-        activity.SetTag("gen_ai.operation.name", "invoke_agent");
-        activity.SetTag("agent.template.id", "custom-agent-local-prototype");
-        activity.SetTag("agent.service.slug", _serviceSlug);
-        activity.SetTag("agent.operation.id", operationId);
-        var traceId = activity.TraceId.ToHexString();
-
-        try
-        {
+            // Share one deadline across the run and honor cancellation from the caller.
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(_runTimeout);
+            // Each turn starts a new, empty session; the browser sends the chat history with every request.
             var session = await _agent.CreateSessionAsync(cancellationToken: deadline.Token);
+            // Collect streamed text into one reply; the chat client handles tool calls between model responses.
             var answer = new StringBuilder();
+            var requestedTools = new Dictionary<string, string>(StringComparer.Ordinal);
+            var toolsUsed = new List<string>();
             await foreach (var update in _agent.RunStreamingAsync(
                                messages,
                                session,
@@ -100,42 +84,38 @@ public class AgentRuntime
                 answer.Append(update.Text);
                 if (answer.Length > MaxAnswerCharacters)
                     throw new InvalidOperationException("agent_response_too_long");
+
+                // Tool requests and their results arrive in the same stream. A tool counts once its result arrives;
+                // a failing tool ends the run with an error instead.
+                foreach (var content in update.Contents)
+                {
+                    if (content is FunctionCallContent call && _toolNames.Contains(call.Name))
+                        requestedTools[call.CallId] = call.Name;
+                    else if (content is FunctionResultContent result && requestedTools.Remove(result.CallId, out var name))
+                        toolsUsed.Add(name);
+                }
             }
 
             var text = answer.ToString().Trim();
             if (text.Length == 0)
                 throw new InvalidOperationException("empty_agent_response");
 
-            activity.SetStatus(ActivityStatusCode.Ok);
-            return new AgentReply(text, traceId);
+            return new AgentReply(text, toolsUsed);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            activity.SetStatus(ActivityStatusCode.Error, "request_cancelled");
             throw;
-        }
-        catch (OperationCanceledException ex)
-        {
-            activity.SetStatus(ActivityStatusCode.Error, "agent_deadline_exceeded");
-            throw new AgentRunException(traceId, ex);
         }
         catch (Exception ex)
         {
-            activity.SetStatus(ActivityStatusCode.Error, "agent_run_failed");
-            throw new AgentRunException(traceId, ex);
+            throw new AgentRunException(ex);
         }
-        finally
-        {
-            activity.Dispose();
-            Activity.Current = previousActivity;
-        }
+        // Restore the caller's tracing context even after an error or cancellation.
+        finally { Activity.Current = previous; }
     }
 }
 
-public sealed record AgentReply(string Answer, string TraceId);
+public sealed record AgentReply(string Answer, IReadOnlyList<string> ToolsUsed);
 
-public sealed class AgentRunException(string traceId, Exception innerException)
-    : Exception("agent_run_failed", innerException)
-{
-    public string TraceId { get; } = traceId;
-}
+public sealed class AgentRunException(Exception innerException)
+    : Exception("agent_run_failed", innerException);

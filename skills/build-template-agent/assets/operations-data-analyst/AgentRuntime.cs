@@ -4,12 +4,16 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
-using Progress.Observability.Extensions.AI;
 
 namespace OperationsDataAnalyst;
 
-public class AgentRuntime(IChatClient chatClient, MetricsStore metrics, string appName,
-    bool tracingEnabled = false, bool recordContent = false)
+/// <summary>
+/// Answers one analysis question: the model calls exactly one tool (explore the metrics, read the current view or
+/// explain a limitation) -> the chart is published as soon as that tool finishes -> the model streams a short
+/// explanation from the tool's actual evidence. Microsoft Agent Framework (MAF) runs the agent on top of the chat
+/// client created in Program.cs.
+/// </summary>
+public class AgentRuntime(IChatClient chatClient, MetricsStore metrics, string appName, bool recordToolContent = false)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -17,28 +21,26 @@ public class AgentRuntime(IChatClient chatClient, MetricsStore metrics, string a
     public async Task<AnalysisReply> RunAsync(AnalysisRequest request, ViewSpec current, ViewRules rules,
         CancellationToken cancellationToken = default, Func<ViewData, Task>? onView = null, Func<string, Task>? onText = null)
     {
-        Activity.DefaultIdFormat = ActivityIdFormat.W3C;
-        Activity.ForceDefaultIdFormat = true;
         var previous = Activity.Current;
-        Activity activity;
-        try
-        {
-            // Keep one Progress-exported workflow root for UI/smoke correlation.
-            // A trace ID alone is not ingestion proof.
-            Activity.Current = null;
-            activity = ObservabilityActivitySource.Instance.StartActivity("operations-data-analyst.ask", ActivityKind.Internal)
-                ?? new Activity("operations-data-analyst.ask").SetIdFormat(ActivityIdFormat.W3C).Start();
-        }
-        catch { Activity.Current = previous; throw; }
-        activity.SetTag("observability.span.kind", "workflow");
-        activity.SetTag("gen_ai.operation.name", "invoke_agent");
-        activity.SetTag("agent.template.id", "operations-data-analyst");
-        var traceId = activity.TraceId.ToHexString();
+        // Share one deadline across the run and honor cancellation from the caller.
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(45));
-        var tools = new AssistantTools(metrics, rules, current, request.ApprovedView is not null, deadline, onView);
+        // One instance per question; onView sends the chart to the page as soon as ExploreMetrics finishes.
+        var assistantTools = new AssistantTools(metrics, rules, current, request.ApprovedView is not null, deadline, onView);
         try
         {
+            // Clearing Activity.Current works around missing tool spans in Progress SDK 1.4.0 under ASP.NET's
+            // HTTP request activity. Remove this reset/restore workaround once the SDK fixes request tracing.
+            Activity.Current = null;
+
+            // Register C# methods as tools; their [Description] attributes guide the model's use.
+            var tools = new List<AITool>
+            {
+                AIFunctionFactory.Create(assistantTools.ExploreMetrics),
+                AIFunctionFactory.Create(assistantTools.GetCurrentContext),
+                AIFunctionFactory.Create(assistantTools.ExplainLimitation),
+            };
+            // Run the tool requested by the model, then send its result back for the explanation.
             var boundedClient = new FunctionInvokingChatClient(chatClient)
             {
                 // One model-selected tool, followed by one synthesis request.
@@ -47,21 +49,21 @@ public class AgentRuntime(IChatClient chatClient, MetricsStore metrics, string a
                 AllowConcurrentInvocation = false,
                 IncludeDetailedErrors = false,
             };
-            AIAgent agent = boundedClient.AsAIAgent(new ChatClientAgentOptions
+            var agent = boundedClient.AsAIAgent(new ChatClientAgentOptions
             {
                 Name = appName,
+                // Reuse our bounded tool loop; MAF should not add another one.
                 UseProvidedChatClientAsIs = true,
                 ChatOptions = new ChatOptions
                 {
-                    Tools = new List<AITool>
-                    {
-                        AIFunctionFactory.Create(tools.ExploreMetrics),
-                        AIFunctionFactory.Create(tools.GetCurrentContext),
-                        AIFunctionFactory.Create(tools.ExplainLimitation),
-                    },
+                    // Add argument/result spans when tracing and content capture are on. SDK 1.4.0 records each tool
+                    // twice but executes it once; an SDK fix is expected to remove the duplicate recording.
+                    Tools = recordToolContent ? tools.AddToolObservability() : tools,
+                    // The first model request must call exactly one tool.
                     ToolMode = ChatToolMode.RequireAny,
                     AllowMultipleToolCalls = false,
                     MaxOutputTokens = 500,
+                    // The model's instructions. AssistantTools and the checks after the run also enforce grounding in code.
                     Instructions = """
                         You are the Operations Data Analyst for a bundled SYNTHETIC CSV, never a live system.
                         Call one tool, then answer the specific question in 1-2 short plain-text sentences,
@@ -123,11 +125,7 @@ public class AgentRuntime(IChatClient chatClient, MetricsStore metrics, string a
                         """,
                 },
             });
-            if (tracingEnabled)
-                agent = agent.AsBuilder().UseOpenTelemetry(
-                    sourceName: ObservabilityTracer.SourceName,
-                    configure: tracing => tracing.EnableSensitiveData = recordContent).Build();
-            using var telemetryLifetime = agent as OpenTelemetryAgent;
+            // Send the question, the last question and the current view as user data; numbers come only from tools.
             var message = JsonSerializer.Serialize(new
             {
                 question = request.Question,
@@ -138,48 +136,46 @@ public class AgentRuntime(IChatClient chatClient, MetricsStore metrics, string a
                 datasetStart = metrics.Start,
                 datasetEnd = metrics.End,
             }, Json);
+            // Each question starts a new, empty session; the server stores no conversation.
             var session = await agent.CreateSessionAsync(cancellationToken: deadline.Token);
+            // Stream the explanation to the page; the chat client handles the tool call between model responses.
             var answer = new StringBuilder();
             await foreach (var update in agent.RunStreamingAsync(message, session, cancellationToken: deadline.Token))
             {
                 // Ignore pre-tool narration; synthesize from the selected tool's actual evidence.
-                if (tools.Evidence is null || string.IsNullOrEmpty(update.Text)) continue;
+                if (assistantTools.Evidence is null || string.IsNullOrEmpty(update.Text)) continue;
                 answer.Append(update.Text);
                 if (answer.Length > 6_000) throw new InvalidOperationException("answer_limit_exceeded");
-                if (onText is not null && !NeedsFixedAnswer(tools.Evidence!.Result)) await onText(update.Text);
+                if (onText is not null && !NeedsFixedAnswer(assistantTools.Evidence!.Result)) await onText(update.Text);
             }
-            if (tools.Evidence is null) throw new InvalidOperationException("grounded_answer_required");
+            if (assistantTools.Evidence is null) throw new InvalidOperationException("grounded_answer_required");
             var text = answer.ToString().Trim();
             if (text.Length == 0) throw new InvalidOperationException("grounded_answer_required");
-            if (tools.Evidence.Result is ExplorationResult { Summary.Status: "empty" })
+            // Empty selections get a fixed answer, so the model cannot describe numbers that do not exist.
+            if (assistantTools.Evidence.Result is ExplorationResult { Summary.Status: "empty" })
                 text = "No matching data exists for this selection in the bundled synthetic CSV. No figures can be inferred from an empty selection.";
-            else if (tools.Evidence.Result is ExplorationResult { Comparison.Status: "empty" })
+            else if (assistantTools.Evidence.Result is ExplorationResult { Comparison.Status: "empty" })
                 text = "At least one comparison period has no matching data. Available values remain in the chart; differences cannot be inferred for a missing period.";
-            if (onText is not null && NeedsFixedAnswer(tools.Evidence.Result)) await onText(text);
-            activity.SetTag("agent.tool.count", 1);
-            activity.SetStatus(ActivityStatusCode.Ok);
-            var data = tools.Data;
-            return new(tools.Limitation?.Status ?? "answered", text, traceId, data?.View ?? current, data?.Dashboard, data?.Chart, data?.Highlights,
-                [tools.Evidence], data is null ? request.LastQuestion : request.Question);
+            if (onText is not null && NeedsFixedAnswer(assistantTools.Evidence.Result)) await onText(text);
+            // Context and limitation answers keep the current view and the last exploration question.
+            var data = assistantTools.Data;
+            return new(assistantTools.Limitation?.Status ?? "answered", text, data?.View ?? current, data?.Dashboard, data?.Chart, data?.Highlights,
+                [assistantTools.Evidence], data is null ? request.LastQuestion : request.Question);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            activity.SetStatus(ActivityStatusCode.Error, "request_cancelled");
             throw;
         }
         catch (Exception error)
         {
-            activity.SetStatus(ActivityStatusCode.Error, "agent_run_failed");
-            throw new AgentRunException(traceId, error);
+            throw new AgentRunException(error);
         }
-        finally { activity.Dispose(); Activity.Current = previous; }
+        // Restore the caller's tracing context even after an error or cancellation.
+        finally { Activity.Current = previous; }
     }
 
     private static bool NeedsFixedAnswer(object result) => result is ExplorationResult { Summary.Status: "empty" } or
         ExplorationResult { Comparison.Status: "empty" };
 }
 
-public sealed class AgentRunException(string traceId, Exception innerException) : Exception("agent_run_failed", innerException)
-{
-    public string TraceId { get; } = traceId;
-}
+public sealed class AgentRunException(Exception innerException) : Exception("agent_run_failed", innerException);

@@ -1,6 +1,6 @@
 # Operations Data Analyst
 
-A compact .NET 10 / Microsoft Agent Framework agent over **synthetic local CSV**:
+A compact .NET 10 / Microsoft Agent Framework (MAF) agent over **synthetic local CSV**:
 90 daily rows, three services, August 1–30, 2026. It explores requests, errors,
 error rates and response times. No database or operational writes.
 
@@ -84,6 +84,26 @@ If credentials were entered in terminal commands, remove those history entries
 in the original shell. In Bash, use `history -d <entry-number>` then `history -w`;
 other open sessions may retain entries.
 
+## Project files
+
+A question moves from the page to `POST /api/analyze/stream` in `Program.cs`, through
+`ViewWorkflow.cs`, to `AgentRuntime.cs`, where the MAF agent calls one tool from
+`Tools.cs`. The chart streams back as soon as that tool finishes, followed by the
+explanation.
+
+| Path | What it does |
+|---|---|
+| `Program.cs` | Startup: settings, CSV load, Azure OpenAI chat client, Progress tracing, HTTP endpoints or `--smoke` |
+| `ViewWorkflow.cs` | Validates a question and its view; `ViewRules` builds charts, tiles, peaks and lows |
+| `AgentRuntime.cs` | Answers one question: agent instructions, the one-tool loop, streaming and grounding checks |
+| `Tools.cs` | `ExploreMetrics`, `GetCurrentContext` and `ExplainLimitation`, the tools the model calls |
+| `MetricsStore.cs` | Loads and validates `data/operations.csv`; summaries, comparisons and outliers |
+| `Models.cs` | Request, view, result and reply records shared by the files above |
+| `SmokeRunner.cs` | The three `--smoke` cases |
+| `appsettings.json` | Non-secret defaults: listen URL, deployment name and app name |
+| `data/operations.csv` | The synthetic metrics |
+| `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
+
 ## How the agent works
 
 A single bounded MAF session calls `ExploreMetrics` to select and calculate a
@@ -150,25 +170,31 @@ the calculated view and reports that the explanation could not finish.
 The three live smoke cases are `known-aggregate`, `comparison-spike`, and
 `empty-selection`. They use the same agent workflow as an explicit UI selection, fixing the test
 view and asserting exact tool-derived numeric results. Free-form questions and
-changes of view are covered separately by protocol tests and browser checks. `SMOKE_REPORT=<json>` includes case status and
-trace IDs; model and Integration settings are required.
+changes of view are covered separately by protocol tests and browser checks.
+`SMOKE_REPORT=<json>` includes each case's status, reason and tools; model and
+Integration settings are required.
 
-Tracing uses the Progress SDK exporter with agent/chat `UseOpenTelemetry`
-instrumentation ([SDK documentation](https://www.telerik.com/ai-observability-platform/documentation/sdk/dotnet#iagent)).
-The agent span contains the model requests and real tool executions in order.
-The SDK captures agent input/output and tool arguments/results automatically.
-Static template identifiers use `AdditionalTags` for filtering.
+A passing local smoke is not proof of backend ingestion: find the service,
+template tag, time and matching question on the
+[Progress Tracing page](https://observability.progress.com/observations).
+This is a small example, not a production monitoring system.
+
+## Tracing
+
+When `Progress:Observability:ApiKey` is configured, each question appears in
+Progress Observability as one trace with the agent run, its model calls and its
+tool call. `Program.cs` adds the Progress SDK through one `AddObservability()`
+wrapper on the chat client, and `AgentRuntime.cs` adds `AddToolObservability()`
+to record tool arguments and results
+([SDK documentation](https://www.telerik.com/ai-observability-platform/documentation/sdk/dotnet)).
+Adding `UseOpenTelemetry()` as well would duplicate spans. Every span carries the
+`agent.template.id:operations-data-analyst` tag for filtering.
 
 `Progress:Observability:RecordInputs` and `Progress:Observability:RecordOutputs`
-default to `true` for the local demo. SDK capture has one combined switch:
-**setting either flag to false disables both input and output content**. The
-health response reports the effective `telemetryRecordContent` value.
-
-Model responses containing only tool calls can have an empty Output text panel.
-The SDK records the structured calls under Tool Calls; the templates add no
-synthetic output text.
-
-To disable content recording for one run:
+default to `true` for the local demo. They act as one switch: **setting either
+flag to false disables all recorded content**, meaning prompts, answers, tool
+arguments and tool results. The health response reports the effective
+`telemetryRecordContent` value. To disable content recording for one run:
 
 ```bash
 PROGRESS__OBSERVABILITY__RECORDINPUTS=false \
@@ -176,12 +202,21 @@ PROGRESS__OBSERVABILITY__RECORDOUTPUTS=false \
 dotnet run --no-build -- --urls http://127.0.0.1:0
 ```
 
-The overrides do not persist. SDK message/tool payloads have no additional
-template truncation. SDK exception text remains outside these content switches.
-The agent's Tool Results panel may remain empty even when results exist in its
-raw output messages. Agent aggregate tokens also repeat model-call usage, so use
-individual model spans when inspecting consumption.
+The overrides do not persist. The template does not truncate recorded content,
+and SDK exception text is not covered by these flags.
 
-Trace IDs prove local execution, **not backend ingestion**; inspect
-the [Progress Tracing page](https://observability.progress.com/observations)
-separately. This is a small example, not a production monitoring system.
+Reading traces with Progress SDK 1.4.0:
+
+- `AgentRuntime` clears `Activity.Current` for each run and restores it
+  afterwards, because the SDK does not emit its automatic tool spans under the
+  ASP.NET request activity. The Progress trace is therefore not linked to the
+  HTTP request trace.
+- Each tool runs once but appears as two spans: the SDK's automatic span under
+  the `orchestrate_tools` root, with metadata only, and the
+  `AddToolObservability()` span under the agent, with arguments and results.
+  That wrapper ignores the record flags, so `AgentRuntime` adds it only when
+  content recording is enabled.
+- Parent spans repeat model-call token usage, so the trace token total is higher
+  than actual usage. Use the individual model-call spans to inspect consumption.
+- A model call that only requests tools shows an empty Output text panel; the
+  requested calls appear under Tool Calls.

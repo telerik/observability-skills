@@ -2,6 +2,11 @@ using System.Text.Json;
 
 namespace CustomAgent;
 
+/// <summary>
+/// Runs the three configured --smoke cases (knowledge, tool and not-found in appsettings.json) as independent
+/// messages through the same AgentRuntime as the chat. A case passes when at least one registered tool returned a
+/// result and every expected marker appears in the answer. Prints one SMOKE_REPORT line; exit code 0 means all passed.
+/// </summary>
 public sealed class SmokeRunner
 {
     private static readonly string[] RequiredCaseIds = ["knowledge", "tool", "not-found"];
@@ -46,19 +51,31 @@ public sealed class SmokeRunner
         {
             var response = await _runtime.RunAsync(
                 smokeCase.Prompt,
-                smokeCase.CaseId,
                 cancellationToken);
-            var passed = smokeCase.ExpectedMarkers.All(marker =>
+            // Expected markers stay in the runner; the model receives only the prompt.
+            var markersFound = smokeCase.ExpectedMarkers.All(marker =>
                 response.Answer.Contains(marker, StringComparison.OrdinalIgnoreCase));
+            // Every case asks about local content, so an answer written without any tool result does not pass.
+            var toolUsed = response.ToolsUsed.Count > 0;
             return new SmokeCaseResult(
                 smokeCase.CaseId,
-                passed ? "pass" : "fail",
-                response.TraceId,
-                passed ? "expected_content_observed" : "expected_markers_missing");
+                toolUsed && markersFound ? "pass" : "fail",
+                !toolUsed ? "no_tool_result" : markersFound ? "tool_result_and_expected_content_observed" : "expected_markers_missing",
+                response.ToolsUsed);
         }
         catch (AgentRunException ex)
         {
-            return new SmokeCaseResult(smokeCase.CaseId, "fail", ex.TraceId, "agent_run_failed");
+            // Name the failure the coding agent can act on: a provider error, a refused or failed network call,
+            // the 45-second deadline, or anything else.
+            var reason = ex.InnerException switch
+            {
+                System.ClientModel.ClientResultException { Status: > 0 } azure => $"azure_openai_http_{azure.Status}",
+                NetworkAccessException network => network.Reason,
+                OperationCanceledException => "agent_deadline_exceeded",
+                _ => "agent_run_failed",
+            };
+            Console.Error.WriteLine($"SMOKE_FAILURE={reason}");
+            return new SmokeCaseResult(smokeCase.CaseId, "fail", reason, []);
         }
     }
 
@@ -97,6 +114,6 @@ public sealed class SmokeRunner
     private sealed record SmokeCaseResult(
         string CaseId,
         string Status,
-        string TraceId,
-        string Reason);
+        string Reason,
+        IReadOnlyList<string> Tools);
 }

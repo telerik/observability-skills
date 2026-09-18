@@ -2,6 +2,11 @@ using System.ComponentModel;
 
 namespace OperationsDataAnalyst;
 
+/// <summary>
+/// The tools the model can call, registered in AgentRuntime. The model chooses a tool and its arguments from the
+/// [Description] text. One instance and one tool call per question: ExploreMetrics calculates and updates the
+/// dashboard, GetCurrentContext explains the current view, and ExplainLimitation covers unsupported requests.
+/// </summary>
 public class AssistantTools(MetricsStore metrics, ViewRules rules, ViewSpec current, bool fixedView,
     CancellationTokenSource budget, Func<ViewData, Task>? onView = null)
 {
@@ -15,6 +20,7 @@ public class AssistantTools(MetricsStore metrics, ViewRules rules, ViewSpec curr
         string? metric = null, string? grouping = null, ComparisonWindows? comparison = null, bool includeOutliers = false, bool includeAllMetrics = false)
     {
         BeginCall();
+        // A dashboard click fixes the view; otherwise the model's changes are merged into the current view.
         var view = fixedView ? current : rules.Merge(current, new(service, start, end, metric, grouping, comparison));
         var summary = metrics.Summarize(view.Service, view.Start, view.End);
         var periods = view.Comparison is { } windows
@@ -33,6 +39,7 @@ public class AssistantTools(MetricsStore metrics, ViewRules rules, ViewSpec curr
             includeAllMetrics ? new(summary, periods) : null);
         Evidence = new(nameof(ExploreMetrics), new ExplorationArguments(view, includeOutliers, includeAllMetrics), result, focused);
         budget.Token.ThrowIfCancellationRequested();
+        // Publish the chart as soon as the numbers exist, before the model writes the explanation.
         if (onView is not null) await onView(Data);
         return focused;
     }
@@ -63,6 +70,7 @@ public class AssistantTools(MetricsStore metrics, ViewRules rules, ViewSpec curr
 
     private void BeginCall()
     {
+        // Only one tool call per question: a second call cancels the run and fails it.
         budget.Token.ThrowIfCancellationRequested();
         if (Interlocked.Increment(ref _calls) > 1)
         {

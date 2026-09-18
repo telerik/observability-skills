@@ -2,6 +2,12 @@ using System.Text.Json.Serialization;
 
 namespace OperationsDataAnalyst;
 
+/// <summary>
+/// Records shared by the metrics store, tools, view workflow and HTTP API. A ViewSpec is what the chart shows;
+/// results carry the exact calculated numbers; AnalysisReply is the answer returned to the page. A Highlight is one
+/// metric tile: Focus names the single chart point it describes, and Explorable marks values the agent tool already
+/// returns, so clicking that tile gets a grounded answer.
+/// </summary>
 public sealed record MetricRow(DateOnly Date, string Service, long Requests, long Errors, long TotalResponseMs);
 public sealed record MetricSummary(int RowCount, long Requests, long Errors, decimal? ErrorRatePercent, decimal? AverageResponseMs);
 public sealed record ServiceMetric(string Service, MetricSummary Summary);
@@ -23,12 +29,10 @@ public sealed record ViewPatch(string? Service, string? Start, string? End, stri
 public sealed record ChartPoint(string Label, decimal? Value);
 public sealed record MetricExtreme(decimal Value, IReadOnlyList<string> Labels);
 public sealed record ChartData(string Title, string Unit, string Kind, IReadOnlyList<ChartPoint> Points);
-/// <param name="Focus">Chart point this tile describes, when it names exactly one plotted point.</param>
-/// <param name="Explorable">True when the agent tool already returns this exact number, so a click gets a grounded answer.</param>
 public sealed record Highlight(string Key, string Label, decimal? Value, string Unit, string Caption, string? Focus, bool Explorable);
 public sealed record ViewData(ViewSpec View, DashboardResult Dashboard, ChartData Chart, IReadOnlyList<Highlight> Highlights);
 public sealed record CurrentContextResult(ViewSpec View, ChartData Chart, IReadOnlyList<Highlight> Highlights, string DataScope);
-public sealed record AnalysisReply(string Status, string Answer, string TraceId, ViewSpec View,
+public sealed record AnalysisReply(string Status, string Answer, ViewSpec View,
     DashboardResult? Dashboard, ChartData? Chart, IReadOnlyList<Highlight>? Highlights,
     IReadOnlyList<ToolEvidence> Evidence, string? LastQuestion);
 public sealed record MetricSelection(string Service, string Start, string End);

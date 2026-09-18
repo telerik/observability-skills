@@ -8,7 +8,10 @@ using System.Text.RegularExpressions;
 return await BehaviorChecker.RunAsync(args);
 #endif
 
-// Transport only: the coding agent judges answers against expectations written before this run.
+/// <summary>
+/// Sends task, follow-up, fresh-chat, and boundary prompts to a running local agent and reports the responses.
+/// The coding agent judges those responses against expectations declared before the run.
+/// </summary>
 internal static class BehaviorChecker
 {
     private const string Usage = "Usage: dotnet run --file check-behavior.cs -- --url <http://127.0.0.1:port> --checks <JSON file> --deadline <UTC ISO8601> [--timeout-seconds <1..60>]";
@@ -16,7 +19,8 @@ internal static class BehaviorChecker
     internal sealed record Options(Uri Url, Checks Checks, DateTimeOffset Deadline, int TimeoutSeconds);
     internal sealed record Turn(string User, string Assistant);
     internal sealed record Request(string Message, Turn[] History);
-    internal sealed record Result(string Check, string Status, string? Answer = null, string? TraceId = null, string? Error = null);
+    internal sealed record Step(string Name, string Prompt, bool ContinuesTask);
+    internal sealed record Result(string Check, string Status, string? Answer = null, string? Error = null);
     internal sealed record Report(string Status, DateTimeOffset DeadlineUtc, long RemainingSeconds, IReadOnlyList<Result> Results);
 
     internal static async Task<int> RunAsync(string[] args)
@@ -62,7 +66,7 @@ internal static class BehaviorChecker
             !values.TryGetValue("--checks", out var path) ||
             !values.TryGetValue("--deadline", out var deadlineText) ||
             !Regex.IsMatch(address, @"\Ahttp://127\.0\.0\.1:[1-9][0-9]{0,4}/?\z") ||
-            !Uri.TryCreate(address, UriKind.Absolute, out var url) || url.Port is < 1 or > 65535 ||
+            !Uri.TryCreate(address, UriKind.Absolute, out var url) ||
             !Regex.IsMatch(deadlineText, @"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|\+00:00)\z") ||
             !DateTimeOffset.TryParse(deadlineText, CultureInfo.InvariantCulture,
                 DateTimeStyles.None, out var deadline)) throw new ArgumentException();
@@ -95,34 +99,42 @@ internal static class BehaviorChecker
 
     internal static async Task<Report> CheckAsync(HttpClient client, Options options)
     {
+        // The task runs first. follow_up continues that conversation, so it needs the task's answer as history and
+        // is skipped when the task did not complete; fresh_chat repeats the follow-up question with no history.
+        Step[] steps =
+        [
+            new("task", options.Checks.Task, ContinuesTask: false),
+            new("follow_up", options.Checks.FollowUp, ContinuesTask: true),
+            new("fresh_chat", options.Checks.FollowUp, ContinuesTask: false),
+            new("boundary", options.Checks.Boundary, ContinuesTask: false),
+        ];
         var results = new List<Result>();
         var deadlineReached = false;
-        var names = new[] { "task", "follow_up", "fresh_chat", "boundary" };
-        var prompts = new[] { options.Checks.Task, options.Checks.FollowUp, options.Checks.FollowUp, options.Checks.Boundary };
-        for (var i = 0; i < names.Length; i++)
+        foreach (var step in steps)
         {
-            if (i == 1 && results[0].Status != "completed")
+            var task = results.FirstOrDefault();
+            if (step.ContinuesTask && task?.Status != "completed")
             {
-                results.Add(new(names[i], "untested", Error: "task_incomplete"));
+                results.Add(new(step.Name, "untested", Error: "task_incomplete"));
                 continue;
             }
             var remaining = options.Deadline - DateTimeOffset.UtcNow;
             if (deadlineReached || remaining <= TimeSpan.Zero)
             {
-                results.Add(new(names[i], "untested", Error: "deadline"));
+                results.Add(new(step.Name, "untested", Error: "deadline"));
                 continue;
             }
             var timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
             var deadlineLimitsRequest = remaining <= timeout;
             using var cancellation = new CancellationTokenSource(deadlineLimitsRequest ? remaining : timeout);
-            Turn[] history = i == 1 ? [new(options.Checks.Task, results[0].Answer!)] : [];
+            Turn[] history = step.ContinuesTask ? [new(options.Checks.Task, task!.Answer!)] : [];
             try
             {
                 using var response = await client.PostAsJsonAsync(new Uri(options.Url, "/api/chat"),
-                    new Request(prompts[i], history), BehaviorJson.Default.Request, cancellation.Token);
+                    new Request(step.Prompt, history), BehaviorJson.Default.Request, cancellation.Token);
                 if (!response.IsSuccessStatusCode)
                 {
-                    results.Add(new(names[i], "incomplete", Error: $"http_{(int)response.StatusCode}"));
+                    results.Add(new(step.Name, "incomplete", Error: $"http_{(int)response.StatusCode}"));
                     continue;
                 }
                 using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellation.Token),
@@ -130,28 +142,26 @@ internal static class BehaviorChecker
                 var body = document.RootElement;
                 if (body.ValueKind != JsonValueKind.Object ||
                     !body.TryGetProperty("answer", out var answer) || answer.ValueKind != JsonValueKind.String ||
-                    string.IsNullOrWhiteSpace(answer.GetString()) ||
-                    !body.TryGetProperty("traceId", out var trace) || trace.ValueKind != JsonValueKind.String ||
-                    !Regex.IsMatch(trace.GetString()!, @"\A[0-9a-fA-F]{32}\z"))
+                    string.IsNullOrWhiteSpace(answer.GetString()))
                 {
-                    results.Add(new(names[i], "incomplete", Error: "invalid_response"));
+                    results.Add(new(step.Name, "incomplete", Error: "invalid_response"));
                     continue;
                 }
-                results.Add(new(names[i], "completed", answer.GetString(), trace.GetString()));
+                results.Add(new(step.Name, "completed", answer.GetString()));
             }
             catch (OperationCanceledException)
             {
                 // Timer rounding can cancel just before the wall-clock deadline.
                 deadlineReached = deadlineLimitsRequest;
-                results.Add(new(names[i], "incomplete", Error: deadlineLimitsRequest ? "deadline" : "timeout"));
+                results.Add(new(step.Name, "incomplete", Error: deadlineLimitsRequest ? "deadline" : "timeout"));
             }
             catch (JsonException)
             {
-                results.Add(new(names[i], "incomplete", Error: "invalid_response"));
+                results.Add(new(step.Name, "incomplete", Error: "invalid_response"));
             }
             catch (Exception error) when (error is HttpRequestException or IOException)
             {
-                results.Add(new(names[i], "incomplete", Error: "request_failed"));
+                results.Add(new(step.Name, "incomplete", Error: "request_failed"));
             }
         }
         // Snapshot at report creation, not a renewed deadline or a guarantee of time remaining later.
