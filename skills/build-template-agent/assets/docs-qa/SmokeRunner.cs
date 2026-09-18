@@ -2,6 +2,10 @@ using System.Text.Json;
 
 namespace DocsQa;
 
+/// <summary>
+/// Runs the three --smoke cases through the same AgentRuntime as the web app, with prompts from
+/// the Smoke section of appsettings.json. Prints one SMOKE_REPORT line; exit code 0 means all passed.
+/// </summary>
 public sealed class SmokeRunner(AgentRuntime runtime, IConfiguration configuration)
 {
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
@@ -24,21 +28,24 @@ public sealed class SmokeRunner(AgentRuntime runtime, IConfiguration configurati
             var prompt = DocumentStore.ValidateQuestion(configuration["Smoke:" + item.PromptKey]);
             try
             {
-                var reply = await runtime.RunAsync(prompt, item.Id, cancellationToken);
-                var ok = item.Check(reply) && reply.TraceId.Length == 32;
+                var reply = await runtime.RunAsync(prompt, cancellationToken);
+                var ok = item.Check(reply);
                 passed &= ok;
                 results.Add(new
                 {
                     caseId = item.Id,
                     status = ok ? "pass" : "fail",
-                    traceId = reply.TraceId,
                     reason = ok ? "expected_behavior_observed" : "grounding_or_result_mismatch"
                 });
             }
             catch (AgentRunException ex)
             {
+                var reason = ex.InnerException is System.ClientModel.ClientResultException { Status: > 0 } azure
+                    ? $"azure_openai_http_{azure.Status}"
+                    : ex.Code;
+                Console.Error.WriteLine($"SMOKE_FAILURE={reason}");
                 passed = false;
-                results.Add(new { caseId = item.Id, status = "fail", traceId = ex.TraceId, reason = ex.Code });
+                results.Add(new { caseId = item.Id, status = "fail", reason });
             }
         }
         Console.WriteLine("SMOKE_REPORT=" + JsonSerializer.Serialize(new { status = passed ? "pass" : "fail", cases = results }));

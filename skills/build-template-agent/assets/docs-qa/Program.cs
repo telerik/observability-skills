@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Azure;
 using Azure.AI.OpenAI;
 using Azure.Identity;
@@ -7,6 +6,9 @@ using Progress.Observability.Extensions.AI;
 
 namespace DocsQa;
 
+/// <summary>
+/// Startup: load settings -> create the model client -> enable tracing -> run HTTP endpoints or smoke cases.
+/// </summary>
 public static class Program
 {
     public static async Task<int> Main(string[] args)
@@ -19,10 +21,9 @@ public static class Program
             WebRootPath = "wwwroot",
         });
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 256 * 1_024);
+        // Local user-secrets supply shared app settings; environment variables can override them.
         builder.Configuration.AddUserSecrets<AgentMarker>(optional: true).AddEnvironmentVariables();
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
-        Activity.DefaultIdFormat = ActivityIdFormat.W3C;
-        Activity.ForceDefaultIdFormat = true;
         if (!Uri.TryCreate(builder.Configuration["AzureOpenAI:Endpoint"], UriKind.Absolute, out var endpoint) || endpoint.Scheme != "https")
             throw new InvalidOperationException("AzureOpenAI:Endpoint must be an absolute HTTPS URL.");
         var deployment = builder.Configuration["AzureOpenAI:Deployment"];
@@ -32,7 +33,7 @@ public static class Program
         var tracingEnabled = !string.IsNullOrWhiteSpace(tracingKey);
         var telemetryRecordInputs = builder.Configuration.GetValue("Progress:Observability:RecordInputs", true);
         var telemetryRecordOutputs = builder.Configuration.GetValue("Progress:Observability:RecordOutputs", true);
-        // SDK content capture is combined: either opt-out disables both directions.
+        // One combined switch: if either flag is false, no prompts, answers or tool payloads are recorded.
         var telemetryRecordContent = telemetryRecordInputs && telemetryRecordOutputs;
         var appName = builder.Configuration["Progress:Observability:AppName"] ?? "docs-qa";
         if (smoke && !tracingEnabled)
@@ -43,25 +44,37 @@ public static class Program
         if (!tracingEnabled) Console.Error.WriteLine("Progress tracing is disabled: Integration key is not configured.");
         try
         {
-            var store = new DocumentStore(Path.Combine(AppContext.BaseDirectory, "docs"));
+            var store = DocumentStore.Load(Path.Combine(AppContext.BaseDirectory, "docs"));
+            var azureOptions = new AzureOpenAIClientOptions();
+            // Smoke tests should surface the first Azure error before retries consume the deadline.
+            if (smoke)
+                azureOptions.RetryPolicy = new System.ClientModel.Primitives.ClientRetryPolicy(0);
             var azure = string.IsNullOrWhiteSpace(azureKey)
-                ? new AzureOpenAIClient(endpoint, new DefaultAzureCredential())
-                : new AzureOpenAIClient(endpoint, new AzureKeyCredential(azureKey));
+                ? new AzureOpenAIClient(endpoint, new DefaultAzureCredential(), azureOptions)
+                : new AzureOpenAIClient(endpoint, new AzureKeyCredential(azureKey), azureOptions);
+            // IChatClient is the model interface MAF uses; here it wraps the Azure OpenAI deployment.
             IChatClient chatClient = azure.GetChatClient(deployment).AsIChatClient();
             if (tracingEnabled)
             {
+                // Configure export to Progress; template tags help find these traces in the Observability UI.
                 ObservabilityTracer.Initialize(new ObservabilityOptions
                 {
                     AppName = appName,
                     ApiKey = tracingKey!,
                     AdditionalTags = ["agent.template.id:docs-qa"],
                 });
-                chatClient = chatClient.AsBuilder().UseOpenTelemetry(
-                    sourceName: ObservabilityTracer.SourceName,
-                    configure: client => client.EnableSensitiveData = telemetryRecordContent).Build();
+                // Trace the agent run, model calls and tool calls; AgentRuntime adds tool arguments and results.
+                chatClient = chatClient.AddObservability(options =>
+                {
+                    options.AppName = appName;
+                    options.RecordInputs = telemetryRecordContent;
+                    options.RecordOutputs = telemetryRecordContent;
+                });
             }
             using var chatClientLifetime = chatClient;
-            var runtime = new AgentRuntime(chatClient, store, appName, tracingEnabled, telemetryRecordContent);
+            // Web requests and smoke checks exercise the same agent runtime.
+            var runtime = new AgentRuntime(chatClient, store, appName,
+                recordToolContent: tracingEnabled && telemetryRecordContent);
             if (smoke) return await new SmokeRunner(runtime, builder.Configuration).RunAsync();
             var app = builder.Build();
             app.UseDefaultFiles();
@@ -75,15 +88,16 @@ public static class Program
                 telemetryRecordContent,
             }));
             app.MapGet("/api/documents", () => Results.Ok(store.Sections));
+            // The page posts a question here; return the completed answer and its sources as JSON.
             app.MapPost("/api/ask", async (AskRequest? request, CancellationToken token) =>
             {
                 AskRequest validated;
                 try { validated = (request ?? new AskRequest(null)).Validate(store); }
                 catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
-                try { return Results.Ok(await runtime.RunAsync(validated, "ask", token)); }
+                try { return Results.Ok(await runtime.RunAsync(validated, token)); }
                 catch (AgentRunException ex)
                 {
-                    return Results.Json(new { error = ex.Code, traceId = ex.TraceId }, statusCode: ex.Code == "agent_timeout" ? 504 : 502);
+                    return Results.Json(new { error = ex.Code }, statusCode: ex.Code == "agent_timeout" ? 504 : 502);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -94,6 +108,7 @@ public static class Program
             await app.RunAsync();
             return 0;
         }
+        // Flush queued spans before exit, including short-lived smoke runs.
         finally { if (tracingEnabled) ObservabilityTracer.Shutdown(); }
     }
 }

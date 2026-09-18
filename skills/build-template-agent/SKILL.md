@@ -8,6 +8,14 @@ description: "Copy, build, smoke-test, and run a finished .NET 10 agent template
 Copy the selected finished asset without generating or customizing source.
 This workflow writes one new project folder.
 
+Throughout intake, build, testing, and troubleshooting, never run
+`dotnet user-secrets list`, read secret-store files, or dump environment values.
+This also forbids listing only key names, checking which keys exist, or filtering
+or redacting the output: those operations still inspect the secret store.
+Run the documented app or smoke command directly and let the app report missing
+configuration. Report only the missing key names and refer to the README;
+never request, inspect, or print credential values.
+
 Use the bundled `templates.json` in this skill directory for the exact IDs,
 project filenames, and three smoke-case IDs. A platform handoff supplies the
 selected template ID:
@@ -50,21 +58,22 @@ Do not ask domain/design questions or route to the custom builder.
    three passing case IDs from the selected catalog entry. Do not accept
    skipped tests, another template's cases, or a report from an earlier run.
 
-   Preserve each exact trace ID emitted by the runner. Azure OpenAI settings
-   (`AzureOpenAI:Endpoint`, `AzureOpenAI:Deployment`, and the optional
-   `AzureOpenAI:ApiKey` when local Azure identity is not used) and
+   Azure OpenAI settings (`AzureOpenAI:Endpoint`, `AzureOpenAI:Deployment`, and
+   the optional `AzureOpenAI:ApiKey` when local Azure identity is not used) and
    `Progress:Observability:ApiKey` (an **Integration** credential) are app
-   inputs. If configuration is missing, name only the missing keys and point to
-   the copied README's user-secrets commands; never request, inspect, or print
-   credential values. Let the app report missing configuration: do not run
-   `dotnet user-secrets list`, read secret-store files, or dump the environment
-   as a prerequisite check.
+   inputs. If configuration is missing, follow the credential-handling rule
+   above and point to the copied README's user-secrets commands; do not inspect
+   configuration as a prerequisite check.
    Mock data describes bundled business fixtures, not a mock model: smoke cases
    and UI actions call configured Azure OpenAI. A successful run used available
    app configuration; never infer that credentials or model access are unnecessary.
 
-   Preserve the bundled tracing setup: Progress exports agent/chat
-   `UseOpenTelemetry` spans, with tool executions under their agent invocation.
+   Preserve the bundled tracing setup: every template uses one
+   `AddObservability()` chat-client wrapper and temporarily clears/restores the
+   caller activity without creating a custom span. Its tools use
+   `AddToolObservability()` when tracing and content capture are enabled, adding
+   argument/result spans alongside the automatic metadata-only tool spans.
+   Do not add another tracing wrapper.
    Tool-only responses may have empty Output text; their structured calls are
    recorded by the SDK.
    `Progress:Observability:RecordInputs` and `Progress:Observability:RecordOutputs`
@@ -108,9 +117,9 @@ Do not ask domain/design questions or route to the custom builder.
 
 Report success only after copy, build, all three smoke cases, and UI health pass.
 Return the absolute project path, verified local UI link, one Progress
-Observability Tracing page link, and the three smoke-case results with their
-emitted trace IDs. Those IDs are local execution evidence; this workflow does
-not verify backend ingestion. State explicitly that backend trace ingestion is
+Observability Tracing page link, and the three smoke-case results. Smoke
+results are local execution evidence; this workflow does not verify backend
+ingestion. State explicitly that backend trace ingestion is
 not independently verified by this workflow. On a failure, report the failed
 gate and the smallest safe retry; do not claim the template is ready.
 

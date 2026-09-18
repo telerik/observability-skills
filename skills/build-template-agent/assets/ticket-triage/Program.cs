@@ -6,6 +6,9 @@ using Progress.Observability.Extensions.AI;
 
 namespace TicketTriage;
 
+/// <summary>
+/// Startup: load settings -> create the model client -> enable tracing -> run HTTP endpoints or smoke cases.
+/// </summary>
 public static class Program
 {
     public static async Task<int> Main(string[] args)
@@ -18,6 +21,7 @@ public static class Program
             WebRootPath = "wwwroot",
         });
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 256 * 1_024);
+        // Local user-secrets supply shared app settings; environment variables can override them.
         builder.Configuration.AddUserSecrets<AgentMarker>(optional: true).AddEnvironmentVariables();
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
         ConfigureApi(builder.Services);
@@ -32,7 +36,7 @@ public static class Program
         var tracingEnabled = !string.IsNullOrWhiteSpace(observabilityKey);
         var telemetryRecordInputs = builder.Configuration.GetValue("Progress:Observability:RecordInputs", true);
         var telemetryRecordOutputs = builder.Configuration.GetValue("Progress:Observability:RecordOutputs", true);
-        // SDK capture is combined: either opt-out disables both directions.
+        // One combined switch: if either flag is false, no prompts, answers or tool payloads are recorded.
         var telemetryRecordContent = telemetryRecordInputs && telemetryRecordOutputs;
         if (smokeMode && !tracingEnabled)
         {
@@ -45,25 +49,36 @@ public static class Program
         try
         {
             var store = TicketStore.Load(AppContext.BaseDirectory);
+            var azureOptions = new AzureOpenAIClientOptions();
+            // Smoke tests should surface the first Azure error before retries consume the deadline.
+            if (smokeMode)
+                azureOptions.RetryPolicy = new System.ClientModel.Primitives.ClientRetryPolicy(0);
             var azureClient = string.IsNullOrWhiteSpace(azureKey)
-                ? new AzureOpenAIClient(endpoint, new DefaultAzureCredential())
-                : new AzureOpenAIClient(endpoint, new AzureKeyCredential(azureKey));
+                ? new AzureOpenAIClient(endpoint, new DefaultAzureCredential(), azureOptions)
+                : new AzureOpenAIClient(endpoint, new AzureKeyCredential(azureKey), azureOptions);
+            // IChatClient is the model interface MAF uses; here it wraps the Azure OpenAI deployment.
             IChatClient chatClient = azureClient.GetChatClient(deployment).AsIChatClient();
             if (tracingEnabled)
             {
+                // Configure export to Progress; template tags help find these traces in the Observability UI.
                 ObservabilityTracer.Initialize(new ObservabilityOptions
                 {
                     AppName = appName,
                     ApiKey = observabilityKey!,
                     AdditionalTags = ["agent.template.id:ticket-triage"],
                 });
-                chatClient = chatClient.AsBuilder().UseOpenTelemetry(
-                    sourceName: ObservabilityTracer.SourceName,
-                    configure: client => client.EnableSensitiveData = telemetryRecordContent).Build();
+                // Trace the agent run, model calls and tool calls; AgentRuntime adds tool arguments and results.
+                chatClient = chatClient.AddObservability(options =>
+                {
+                    options.AppName = appName;
+                    options.RecordInputs = telemetryRecordContent;
+                    options.RecordOutputs = telemetryRecordContent;
+                });
             }
             using var chatClientLifetime = chatClient;
+            // Web requests and smoke checks exercise the same agent runtime.
             var runtime = new AgentRuntime(chatClient, store, appName,
-                tracingEnabled: tracingEnabled, recordContent: telemetryRecordContent);
+                recordToolContent: tracingEnabled && telemetryRecordContent);
             if (smokeMode) return await new SmokeRunner(runtime, builder.Configuration).RunAsync();
 
             var app = builder.Build();
@@ -74,12 +89,14 @@ public static class Program
             await app.RunAsync();
             return 0;
         }
+        // Flush queued spans before exit, including short-lived smoke runs.
         finally { if (tracingEnabled) ObservabilityTracer.Shutdown(); }
     }
 
     public static void ConfigureApi(IServiceCollection services)
         => services.ConfigureHttpJsonOptions(options =>
         {
+            // Duplicate or unknown JSON fields fail request binding, before any model call.
             options.SerializerOptions.AllowDuplicateProperties = false;
             options.SerializerOptions.UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow;
         });
@@ -101,14 +118,15 @@ public static class Program
             telemetryRecordContent,
         }));
         app.MapGet("/api/tickets", () => Results.Ok(new { tickets = store.Tickets, mockData = true }));
+        // The page posts a ticket ID with an optional question or scenario; return the answer and typed recommendation.
         app.MapPost("/api/triage", async (TriageRequest? request, CancellationToken cancellationToken) =>
         {
             if (request is null) return Results.BadRequest(new { error = "valid_ticket_id_required" });
-            try { return Results.Ok(await runtime.RunAsync(request, request.Question is null ? "triage" : "question", cancellationToken)); }
+            try { return Results.Ok(await runtime.RunAsync(request, cancellationToken)); }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
             catch (AgentRunException ex)
             {
-                return Results.Json(new { error = ex.Code, traceId = ex.TraceId },
+                return Results.Json(new { error = ex.Code },
                     statusCode: ex.Code == "agent_deadline_exceeded" ? 504 : 502);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

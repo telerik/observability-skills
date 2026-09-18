@@ -66,13 +66,30 @@ If credentials were entered in terminal commands, remove those history entries
 in the original shell. In Bash, use `history -d <entry-number>` then `history -w`;
 other open sessions may retain entries.
 
+## Project files
+
+A question moves from the page to `POST /api/ask` in `Program.cs`, then to
+`AgentRuntime.cs`, where a Microsoft Agent Framework (MAF) agent calls the tools
+in `Tools.cs` to search and read the bundled documents before it answers.
+
+| Path | What it does |
+|---|---|
+| `Program.cs` | Startup: settings, Azure OpenAI chat client, Progress tracing, HTTP endpoints or `--smoke` |
+| `AgentRuntime.cs` | Answers one question: request validation, agent instructions, tool loop and limits |
+| `Tools.cs` | `SearchDocuments` and `ReadSection`, the tools the model calls; records citations and checks retrieval |
+| `DocumentStore.cs` | Loads `docs/*.md` as sections and searches them by matching words |
+| `SmokeRunner.cs` | The three `--smoke` cases |
+| `appsettings.json` | Non-secret defaults: listen URL, deployment name, app name and smoke prompts |
+| `docs/` | The four bundled synthetic manuals |
+| `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
+
 ## Small runtime contract
 
 - `GET /api/health`: corpus readiness and tracing state, not model connectivity.
 - `GET /api/documents`: bundled sections only.
 - `POST /api/ask` with `{ "question": "How long are audit logs retained?" }`:
-  `status`, `answer`, structured `citations`, actual `toolCalls`, and `traceId`.
-  Each answer shows its trace ID and the tools the agent actually ran beneath it.
+  `status`, `answer`, structured `citations` and actual `toolCalls`.
+  Each answer shows the tools the agent actually ran beneath it.
 - Optional request fields: `previousTurn: { "question": "...", "answer": "..." }`
   and `sourceId: "exports#export-availability"`. Context is one previous Q/A pair,
   not full conversation history; omit both fields for an independent lookup.
@@ -88,26 +105,26 @@ other open sessions may retain entries.
   and explicit loading, empty, no-match and failure states.
 
 `--smoke` runs exactly `grounded-answer`, `two-sources`, `unknown-not-found`,
-checking actual tool calls, source IDs, known fixture values and W3C trace IDs.
+checking actual tool calls, source IDs and known fixture values.
 It requires model access and a Progress Integration key, and prints one
 `SMOKE_REPORT=<json>` line.
 
-Tracing uses the Progress SDK exporter with agent/chat `UseOpenTelemetry`
-instrumentation ([SDK documentation](https://www.telerik.com/ai-observability-platform/documentation/sdk/dotnet#iagent)).
-One agent span contains the model requests and real tool executions in order.
-The SDK captures agent input/output and tool arguments/results automatically.
-Static template identifiers use `AdditionalTags` for filtering.
+## Tracing
+
+When `Progress:Observability:ApiKey` is configured, each question appears in
+Progress Observability as one trace with the agent run, its model calls and its
+tool calls. `Program.cs` adds the Progress SDK through one `AddObservability()`
+wrapper on the chat client, and `AgentRuntime.cs` adds `AddToolObservability()`
+to record tool arguments and results
+([SDK documentation](https://www.telerik.com/ai-observability-platform/documentation/sdk/dotnet)).
+Adding `UseOpenTelemetry()` as well would duplicate spans. Every span carries the
+`agent.template.id:docs-qa` tag for filtering.
 
 `Progress:Observability:RecordInputs` and `Progress:Observability:RecordOutputs`
-default to `true` for the local demo. Content capture has one combined switch:
-**setting either flag to false disables both input and output content**. The
-health response reports the effective `telemetryRecordContent` value.
-
-Model responses containing only tool calls can have an empty Output text panel.
-The SDK records the structured calls under Tool Calls; the templates add no
-synthetic output text.
-
-To disable content recording for one run:
+default to `true` for the local demo. They act as one switch: **setting either
+flag to false disables all recorded content**, meaning prompts, answers, tool
+arguments and tool results. The health response reports the effective
+`telemetryRecordContent` value. To disable content recording for one run:
 
 ```bash
 PROGRESS__OBSERVABILITY__RECORDINPUTS=false \
@@ -115,11 +132,25 @@ PROGRESS__OBSERVABILITY__RECORDOUTPUTS=false \
 dotnet run --no-build -- --urls http://127.0.0.1:0
 ```
 
-The overrides do not persist. SDK message/tool payloads have no additional
-template truncation. SDK exception text remains outside these content switches.
-The agent's Tool Results panel may remain empty even when results exist in its
-raw output messages. Agent aggregate tokens also repeat model-call usage, so use
-individual model spans when inspecting consumption.
+The overrides do not persist. The template does not truncate recorded content,
+and SDK exception text is not covered by these flags.
 
-A passing local smoke is not proof of backend ingestion: verify those exact
-trace IDs on the [Progress Tracing page](https://observability.progress.com/observations).
+Reading traces with Progress SDK 1.4.0:
+
+- `AgentRuntime` clears `Activity.Current` for each run and restores it
+  afterwards, because the SDK does not emit its automatic tool spans under the
+  ASP.NET request activity. The Progress trace is therefore not linked to the
+  HTTP request trace.
+- Each tool runs once but appears as two spans: the SDK's automatic span under
+  the `orchestrate_tools` root, with metadata only, and the
+  `AddToolObservability()` span under the agent, with arguments and results.
+  That wrapper ignores the record flags, so `AgentRuntime` adds it only when
+  content recording is enabled.
+- Parent spans repeat model-call token usage, so the trace token total is higher
+  than actual usage. Use the individual model-call spans to inspect consumption.
+- A model call that only requests tools shows an empty Output text panel; the
+  requested calls appear under Tool Calls.
+
+A passing local smoke is not proof of backend ingestion: find the service,
+template tag, time and matching prompt on the
+[Progress Tracing page](https://observability.progress.com/observations).

@@ -6,6 +6,9 @@ using Progress.Observability.Extensions.AI;
 
 namespace OperationsDataAnalyst;
 
+/// <summary>
+/// Startup: load settings and the CSV -> create the model client -> enable tracing -> run HTTP endpoints or smoke cases.
+/// </summary>
 public static class Program
 {
     public static async Task<int> Main(string[] args)
@@ -18,6 +21,7 @@ public static class Program
             WebRootPath = "wwwroot",
         });
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 256 * 1_024);
+        // Local user-secrets supply shared app settings; environment variables can override them.
         builder.Configuration.AddUserSecrets<AgentMarker>(optional: true).AddEnvironmentVariables();
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
         var endpointValue = Require(builder.Configuration, "AzureOpenAI:Endpoint");
@@ -29,7 +33,7 @@ public static class Program
         var tracingEnabled = !string.IsNullOrWhiteSpace(observabilityKey);
         var telemetryRecordInputs = builder.Configuration.GetValue("Progress:Observability:RecordInputs", true);
         var telemetryRecordOutputs = builder.Configuration.GetValue("Progress:Observability:RecordOutputs", true);
-        // SDK capture is combined: either opt-out disables both directions.
+        // One combined switch: if either flag is false, no prompts, answers or tool payloads are recorded.
         var telemetryRecordContent = telemetryRecordInputs && telemetryRecordOutputs;
         var appName = builder.Configuration["Progress:Observability:AppName"] ?? "operations-data-analyst";
         if (smokeMode && !tracingEnabled)
@@ -47,24 +51,36 @@ public static class Program
             Console.WriteLine($"Analysing {metrics.RowCount} rows from {metrics.SourcePath} " +
                 $"(sha256:{metrics.Fingerprint}, {metrics.Start:yyyy-MM-dd} to {metrics.End:yyyy-MM-dd}, " +
                 $"services: {string.Join(", ", metrics.Services)}).");
+            var azureOptions = new AzureOpenAIClientOptions();
+            // Smoke tests should surface the first Azure error before retries consume the deadline.
+            if (smokeMode)
+                azureOptions.RetryPolicy = new System.ClientModel.Primitives.ClientRetryPolicy(0);
             var azure = string.IsNullOrWhiteSpace(azureKey)
-                ? new AzureOpenAIClient(endpoint, new DefaultAzureCredential())
-                : new AzureOpenAIClient(endpoint, new AzureKeyCredential(azureKey));
+                ? new AzureOpenAIClient(endpoint, new DefaultAzureCredential(), azureOptions)
+                : new AzureOpenAIClient(endpoint, new AzureKeyCredential(azureKey), azureOptions);
+            // IChatClient is the model interface MAF uses; here it wraps the Azure OpenAI deployment.
             IChatClient client = azure.GetChatClient(deployment).AsIChatClient();
             if (tracingEnabled)
             {
+                // Configure export to Progress; template tags help find these traces in the Observability UI.
                 ObservabilityTracer.Initialize(new ObservabilityOptions
                 {
                     AppName = appName,
                     ApiKey = observabilityKey!,
                     AdditionalTags = ["agent.template.id:operations-data-analyst"],
                 });
-                client = client.AsBuilder().UseOpenTelemetry(
-                    sourceName: ObservabilityTracer.SourceName,
-                    configure: tracing => tracing.EnableSensitiveData = telemetryRecordContent).Build();
+                // Trace the agent run, model calls and tool calls; AgentRuntime adds tool arguments and results.
+                client = client.AddObservability(options =>
+                {
+                    options.AppName = appName;
+                    options.RecordInputs = telemetryRecordContent;
+                    options.RecordOutputs = telemetryRecordContent;
+                });
             }
             using var chatClientLifetime = client;
-            var runtime = new AgentRuntime(client, metrics, appName, tracingEnabled: tracingEnabled, recordContent: telemetryRecordContent);
+            var runtime = new AgentRuntime(client, metrics, appName,
+                recordToolContent: tracingEnabled && telemetryRecordContent);
+            // Web requests and smoke checks ask through the same workflow and agent runtime.
             var workflow = new ViewWorkflow(runtime, metrics);
             if (smokeMode) return await new SmokeRunner(workflow).RunAsync();
 
@@ -85,6 +101,7 @@ public static class Program
                 tracingEnabled,
                 telemetryRecordContent,
             }));
+            // Returns the complete agent result as one JSON response.
             app.MapPost("/api/analyze", async (AnalysisRequest? request, CancellationToken cancellationToken) =>
             {
                 if (request is null) return Results.BadRequest(new { error = "question_required" });
@@ -93,15 +110,16 @@ public static class Program
                     return Results.Ok(await workflow.AskAsync(request, cancellationToken));
                 }
                 catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
-                catch (AgentRunException error)
+                catch (AgentRunException)
                 {
-                    return Results.Json(new { error = "agent_run_failed", traceId = error.TraceId }, statusCode: 502);
+                    return Results.Json(new { error = "agent_run_failed" }, statusCode: 502);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     return Results.Json(new { error = "request_cancelled" }, statusCode: 499);
                 }
             });
+            // The page's main route: newline-delimited JSON events with the chart (view), answer text, then done or error.
             app.MapPost("/api/analyze/stream", async (AnalysisRequest? request, HttpContext context) =>
             {
                 context.Response.ContentType = "application/x-ndjson";
@@ -122,12 +140,13 @@ public static class Program
                     await Send(new { type = "done", data = reply });
                 }
                 catch (ArgumentException error) { await Send(new { type = "error", error = error.Message }); }
-                catch (AgentRunException error)
+                catch (AgentRunException)
                 {
-                    await Send(new { type = "error", error = "agent_run_failed", traceId = error.TraceId });
+                    await Send(new { type = "error", error = "agent_run_failed" });
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
             });
+            // Chart, tiles and rows for an exact selection, without a model call.
             app.MapPost("/api/view", (ViewSpec? view) =>
             {
                 try { return Results.Ok(workflow.Rules.Data(view ?? workflow.Rules.Default)); }
@@ -137,6 +156,7 @@ public static class Program
             await app.RunAsync();
             return 0;
         }
+        // Flush queued spans before exit, including short-lived smoke runs.
         finally { if (tracingEnabled) ObservabilityTracer.Shutdown(); }
     }
 

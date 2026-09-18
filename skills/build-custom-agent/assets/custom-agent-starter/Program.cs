@@ -7,6 +7,10 @@ using Progress.Observability.Extensions.AI;
 
 namespace CustomAgent;
 
+/// <summary>
+/// Startup: load the agent definition, approved capabilities, content and settings -> create the model client ->
+/// enable tracing -> build the agent -> run HTTP endpoints or smoke cases.
+/// </summary>
 public static class Program
 {
     public static async Task<int> Main(string[] args)
@@ -20,7 +24,7 @@ public static class Program
         });
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 256 * 1_024);
 
-        // Standard .NET precedence: appsettings.json -> user secrets -> environment.
+        // Local user-secrets supply shared app settings; environment variables can override them.
         builder.Configuration
             .AddUserSecrets<AgentMarker>(optional: true)
             .AddEnvironmentVariables();
@@ -28,10 +32,14 @@ public static class Program
 
         var definition = AgentDefinition.Load(builder.Configuration);
         var presentation = AgentPresentation.Load(builder.Configuration);
-        var knowledgeBase = new KnowledgeBase(
+        var capabilities = Capabilities.Load(builder.Configuration);
+        var knowledgeBase = KnowledgeBase.Load(
             AppContext.BaseDirectory,
             builder.Configuration.GetSection("Content:Sources"));
-        var tools = definition.CreateTools(knowledgeBase);
+        // The agent's tools come from AgentDefinition.CreateTools; startup accepts one to three AIFunction tools.
+        // The HTTP client they receive reaches only the approved hosts (Capabilities.cs).
+        using var http = new ApprovedHttpClient(capabilities.Network.AllowedHosts);
+        var tools = definition.CreateTools(knowledgeBase, http);
         if (tools is null || tools.Count is < 1 or > 3 || tools.Any(tool => tool is not AIFunction))
             throw new InvalidOperationException("Custom agent must register one to three AIFunction tools.");
 
@@ -49,7 +57,7 @@ public static class Program
         var tracingEnabled = !string.IsNullOrWhiteSpace(observabilityKey);
         var telemetryRecordInputs = builder.Configuration.GetValue("Progress:Observability:RecordInputs", true);
         var telemetryRecordOutputs = builder.Configuration.GetValue("Progress:Observability:RecordOutputs", true);
-        // SDK capture is combined: either opt-out disables both directions.
+        // One combined switch: if either flag is false, no prompts, answers or tool payloads are recorded.
         var telemetryRecordContent = telemetryRecordInputs && telemetryRecordOutputs;
 
         if (smokeMode && !tracingEnabled)
@@ -67,49 +75,62 @@ public static class Program
 
         try
         {
+            var azureOptions = new AzureOpenAIClientOptions();
+            // Smoke tests should surface the first Azure error before retries consume the deadline.
+            if (smokeMode)
+                azureOptions.RetryPolicy = new System.ClientModel.Primitives.ClientRetryPolicy(0);
             var azureClient = string.IsNullOrWhiteSpace(azureKey)
-                ? new AzureOpenAIClient(azureEndpoint, new DefaultAzureCredential())
-                : new AzureOpenAIClient(azureEndpoint, new AzureKeyCredential(azureKey));
+                ? new AzureOpenAIClient(azureEndpoint, new DefaultAzureCredential(), azureOptions)
+                : new AzureOpenAIClient(azureEndpoint, new AzureKeyCredential(azureKey), azureOptions);
 
+            // IChatClient is the model interface MAF uses; here it wraps the Azure OpenAI deployment.
             IChatClient chatClient = azureClient.GetChatClient(deployment).AsIChatClient();
             if (tracingEnabled)
             {
+                // Configure export to Progress; template tags help find these traces in the Observability UI.
                 ObservabilityTracer.Initialize(new ObservabilityOptions
                 {
                     AppName = definition.ServiceSlug,
                     ApiKey = observabilityKey!,
                     AdditionalTags = ["agent.template.id:custom-agent-local-prototype", $"agent.service.slug:{definition.ServiceSlug}"],
                 });
-                chatClient = chatClient.AsBuilder().UseOpenTelemetry(
-                    sourceName: ObservabilityTracer.SourceName,
-                    configure: client => client.EnableSensitiveData = telemetryRecordContent).Build();
+                // Trace the agent run, model calls and tool calls; tool arguments and results are added below.
+                chatClient = chatClient.AddObservability(options =>
+                {
+                    options.AppName = definition.ServiceSlug;
+                    options.RecordInputs = telemetryRecordContent;
+                    options.RecordOutputs = telemetryRecordContent;
+                });
             }
             using var chatClientLifetime = chatClient;
+            // Run tools requested by the model, then send their results back for the next model response.
             var boundedClient = new FunctionInvokingChatClient(chatClient)
             {
+                // This client allows a final answer-only request: three iterations can mean four model calls.
                 MaximumIterationsPerRequest = 3,
                 MaximumConsecutiveErrorsPerRequest = 0,
                 AllowConcurrentInvocation = false,
                 IncludeDetailedErrors = false,
             };
+            // One agent serves every request; each run starts its own session in AgentRuntime.
             AIAgent agent = boundedClient.AsAIAgent(new ChatClientAgentOptions
             {
                 Name = definition.ServiceSlug,
+                // Reuse our bounded tool loop; MAF should not add another one.
                 UseProvidedChatClientAsIs = true,
                 ChatOptions = new ChatOptions
                 {
+                    // The configured instructions followed by the fixed response policy.
                     Instructions = definition.Instructions + "\n\n" + AgentRuntime.ResponsePolicy,
-                    Tools = tools,
+                    // Add argument/result spans when tracing and content capture are on. SDK 1.4.0 records each tool
+                    // twice but executes it once; an SDK fix is expected to remove the duplicate recording.
+                    Tools = tracingEnabled && telemetryRecordContent ? tools.AddToolObservability() : tools,
                     MaxOutputTokens = 800,
                     AllowMultipleToolCalls = false,
                 },
             });
-            if (tracingEnabled)
-                agent = agent.AsBuilder().UseOpenTelemetry(
-                    sourceName: ObservabilityTracer.SourceName,
-                    configure: tracing => tracing.EnableSensitiveData = telemetryRecordContent).Build();
-            using var telemetryLifetime = agent as OpenTelemetryAgent;
-            var runtime = new AgentRuntime(agent, definition.ServiceSlug);
+            // Web chat and smoke checks exercise the same agent runtime.
+            var runtime = new AgentRuntime(agent);
 
             if (smokeMode)
                 return await new SmokeRunner(runtime, builder.Configuration).RunAsync();
@@ -131,13 +152,15 @@ public static class Program
 
             app.MapGet("/api/health", () => Results.Ok(new
             {
-                status = knowledgeBase.SourceCount > 0 ? "ready" : "degraded",
+                status = "ready",
                 sourcesLoaded = knowledgeBase.SourceCount,
+                networkHosts = capabilities.Network.AllowedHosts,
                 tracingEnabled,
                 telemetryRecordContent,
                 mode = "local_prototype",
             }));
 
+            // The page posts a message with its bounded history here; return the answer as JSON.
             app.MapPost("/api/chat", async (
                 ChatRequest? request,
                 CancellationToken cancellationToken) =>
@@ -147,13 +170,13 @@ public static class Program
 
                 try
                 {
-                    var response = await runtime.RunAsync(messages, "chat", cancellationToken);
-                    return Results.Ok(new { answer = response.Answer, traceId = response.TraceId });
+                    var response = await runtime.RunAsync(messages, cancellationToken);
+                    return Results.Ok(new { answer = response.Answer });
                 }
-                catch (AgentRunException ex)
+                catch (AgentRunException)
                 {
                     return Results.Json(
-                        new { error = "agent_run_failed", traceId = ex.TraceId },
+                        new { error = "agent_run_failed" },
                         statusCode: StatusCodes.Status502BadGateway);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -170,6 +193,7 @@ public static class Program
         }
         finally
         {
+            // Flush queued spans before exit, including short-lived smoke runs.
             if (tracingEnabled) ObservabilityTracer.Shutdown();
         }
     }

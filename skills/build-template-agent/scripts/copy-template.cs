@@ -5,6 +5,12 @@ using System.Text.RegularExpressions;
 
 return TemplateCopier.Run(args);
 
+/// <summary>
+/// Copies one ready template listed in templates.json (release-evidence-reviewer by default) into a missing or empty
+/// target folder, named after the template unless --target is given, and prints the created path; --list prints the
+/// catalog instead. The copy is built in a staging folder beside the target and then moved into place. bin, obj, .git
+/// and .env files are left out; links and targets inside the template are refused (exit code 2).
+/// </summary>
 static class TemplateCopier
 {
     private static readonly HashSet<string> ExcludedNames = new(StringComparer.Ordinal)

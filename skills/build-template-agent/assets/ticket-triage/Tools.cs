@@ -2,7 +2,11 @@ using System.ComponentModel;
 
 namespace TicketTriage;
 
-// One instance per agent run: recommendations and tool history never cross requests.
+/// <summary>
+/// The tools the model can call, registered in AgentRuntime. The model chooses a tool and its arguments from
+/// the [Description] text. One instance per run: recommendations and tool history never cross requests, and
+/// every call is limited to the selected ticket.
+/// </summary>
 public class AssistantTools(TicketStore store, string ticketId, int maxCalls = 8)
 {
     private readonly object _gate = new();
@@ -19,6 +23,7 @@ public class AssistantTools(TicketStore store, string ticketId, int maxCalls = 8
         var result = store.GetTicket(id);
         MissingTicketObserved = result.Status == "not_found";
         LastRecommendation = store.Suggest(id);
+        // With a scenario, return the unchanged bundled ticket; the recommendation uses the effective facts.
         return new(result.Status, store.BundledTicket ?? result.Ticket, result.Source,
             LastRecommendation, store.Scenario);
     }
@@ -39,6 +44,8 @@ public class AssistantTools(TicketStore store, string ticketId, int maxCalls = 8
 
     private void Record(string tool, string? id = null)
     {
+        // Every attempt counts. A call over the limit or for another ticket throws, and AgentRuntime then
+        // rejects the whole run.
         lock (_gate)
         {
             if (_toolsUsed.Count >= maxCalls)

@@ -1,8 +1,10 @@
 namespace CustomAgent;
 
 /// <summary>
-/// Small deterministic retriever over bounded local prototype content.
-/// Production data-source adapters are intentionally outside this starter.
+/// Provides local search and reading methods. Load reads the files declared under Content:Sources from docs/ and
+/// data/; the constructor only indexes documents that are already in memory. An agent whose tools only compute or
+/// read approved hosts declares no content and gets an empty knowledge base. During custom agent generation, the
+/// coding agent chooses which methods to use in Tools.cs; KnowledgeBase.cs stays unchanged.
 /// </summary>
 public class KnowledgeBase
 {
@@ -16,24 +18,43 @@ public class KnowledgeBase
         new(StringComparer.OrdinalIgnoreCase);
     private readonly List<ContentChunk> _chunks = [];
 
-    public KnowledgeBase(string contentRoot, IConfigurationSection sourceConfiguration)
+    private KnowledgeBase(IReadOnlyList<SourceDocument> documents)
     {
+        // Index each loaded document by its label and split it into the chunks that Search and SearchData score.
+        foreach (var source in documents)
+        {
+            _sources.Add(source.Label, source);
+            foreach (var chunk in SplitIntoChunks(source.Content))
+            {
+                _chunks.Add(new ContentChunk(
+                    source.Label,
+                    chunk.Section,
+                    chunk.Content,
+                    source.Provenance,
+                    source.IsStructuredData));
+            }
+        }
+    }
+
+    public static KnowledgeBase Load(string contentRoot, IConfigurationSection sourceConfiguration)
+    {
+        // Only declared files load, each with mock or supplied provenance; an undeclared or missing file fails startup.
         var root = Path.GetFullPath(contentRoot);
         var declared = ReadDeclaredSources(sourceConfiguration);
+        var documents = new List<SourceDocument>();
         var loaded = new HashSet<string>(StringComparer.Ordinal);
         var totalBytes = 0L;
 
         LoadFolder(root, "docs", new HashSet<string>(StringComparer.Ordinal) { ".md", ".txt" }, false);
         LoadFolder(root, "data", new HashSet<string>(StringComparer.Ordinal) { ".json", ".csv" }, true);
 
-        if (_sources.Count == 0)
-            throw new InvalidOperationException("At least one declared local content source is required.");
         var unmatched = declared.Keys
             .Where(label => !loaded.Contains(label))
             .Order(StringComparer.Ordinal)
             .FirstOrDefault();
         if (unmatched is not null)
             throw new InvalidOperationException($"Declared local content source was not loaded: {unmatched}");
+        return new KnowledgeBase(documents);
 
         void LoadFolder(
             string baseDirectory,
@@ -41,6 +62,7 @@ public class KnowledgeBase
             HashSet<string> allowedExtensions,
             bool isStructuredData)
         {
+            // Links and hidden files are never read, and file count and size limits apply while loading.
             var directory = Path.Combine(baseDirectory, folder);
             if (!Directory.Exists(directory)) return;
             if (File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint))
@@ -67,25 +89,15 @@ public class KnowledgeBase
                 var info = new FileInfo(path);
                 if (info.Length > MaxFileBytes)
                     throw new InvalidOperationException($"Local content file '{label}' exceeds the 1 MiB limit.");
-                if (_sources.Count >= MaxFiles)
+                if (documents.Count >= MaxFiles)
                     throw new InvalidOperationException($"Local content may contain at most {MaxFiles} files.");
                 if (info.Length > MaxTotalBytes - totalBytes)
                     throw new InvalidOperationException("Local content exceeds the 5 MiB total limit.");
 
                 totalBytes += info.Length;
-                var content = File.ReadAllText(path);
-                var source = new SourceDocument(label, content, provenance);
-                _sources.Add(label, source);
-                loaded.Add(label);
-                foreach (var chunk in SplitIntoChunks(content))
-                {
-                    _chunks.Add(new ContentChunk(
-                        label,
-                        chunk.Section,
-                        chunk.Content,
-                        provenance,
-                        isStructuredData));
-                }
+                if (!loaded.Add(label))
+                    throw new InvalidOperationException($"Local content source is listed twice: {label}");
+                documents.Add(new SourceDocument(label, File.ReadAllText(path), provenance, isStructuredData));
             }
         }
     }
@@ -100,6 +112,7 @@ public class KnowledgeBase
 
     public string Read(string sourceLabel)
     {
+        // Read a whole source by its label or file name, capped at MaxReadCharacters.
         var normalized = NormalizeLabel(sourceLabel);
         var source = _sources.Values.FirstOrDefault(item =>
             string.Equals(item.Label, normalized, StringComparison.OrdinalIgnoreCase) ||
@@ -124,8 +137,8 @@ public class KnowledgeBase
             if (!IsValidSourceLabel(label) || !result.TryAdd(label, ParseProvenance(item.Value, label)))
                 throw new InvalidOperationException($"Invalid or duplicate local content source declaration: {label}");
         }
-        if (result.Count is < 1 or > MaxFiles)
-            throw new InvalidOperationException($"Content:Sources must declare 1 to {MaxFiles} local files.");
+        if (result.Count > MaxFiles)
+            throw new InvalidOperationException($"Content:Sources may declare at most {MaxFiles} local files.");
         return result;
     }
 
@@ -153,6 +166,7 @@ public class KnowledgeBase
 
     private static IEnumerable<SectionChunk> SplitIntoChunks(string content)
     {
+        // Each Markdown heading starts a section; blank lines end paragraphs, and long paragraphs become fixed-size chunks.
         var normalized = content.Replace("\r\n", "\n", StringComparison.Ordinal);
         var section = "(no heading)";
         var paragraph = new List<string>();
@@ -190,6 +204,7 @@ public class KnowledgeBase
         string emptyReason,
         int topK = 3)
     {
+        // Score chunks by how many query words appear in their text or section heading; return at most three.
         var terms = QueryTerms(query);
         if (terms.Length == 0)
             return "status=not_found; reason=query_has_no_search_terms";
@@ -240,7 +255,8 @@ public class KnowledgeBase
     private sealed record SourceDocument(
         string Label,
         string Content,
-        SourceProvenance Provenance);
+        SourceProvenance Provenance,
+        bool IsStructuredData);
     private sealed record SectionChunk(string Section, string Content);
     private sealed record ContentChunk(
         string Source,

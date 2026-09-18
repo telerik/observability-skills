@@ -3,68 +3,59 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
-using Progress.Observability.Extensions.AI;
 
 namespace ReleaseEvidenceReviewer;
 
-// Context travels with one request, never in a shared or persisted agent session.
+/// <summary>
+/// Reviews one message: validate -> let the model search release evidence or check readiness through tools ->
+/// return its answer with the reviewed project, the tools that ran and the typed verdict. Microsoft Agent
+/// Framework (MAF) runs the agent on top of the chat client created in Program.cs. Context travels with each
+/// request, never in a shared or persisted agent session.
+/// </summary>
 public class AgentRuntime(IChatClient chatClient, KnowledgeBase knowledgeBase, string appName,
-    TimeSpan? timeout = null, bool tracingEnabled = false, bool recordContent = false)
+    TimeSpan? timeout = null, bool recordToolContent = false)
 {
     public async Task<AgentReply> RunAsync(
         string message,
-        string operationId,
         CancellationToken cancellationToken = default,
         ReviewContext? context = null)
     {
         message = Validate(message, context);
+        // Share one deadline across the run and honor cancellation from the caller.
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(45));
-        Activity.DefaultIdFormat = ActivityIdFormat.W3C;
-        Activity.ForceDefaultIdFormat = true;
-
-        var previousActivity = Activity.Current;
-        Activity? activity;
+        var previous = Activity.Current;
         try
         {
-            // Keep one Progress-exported workflow root for UI/smoke correlation.
-            // A trace ID alone is not ingestion proof.
+            // Clearing Activity.Current works around missing tool spans in Progress SDK 1.4.0 under ASP.NET's
+            // HTTP request activity. Remove this reset/restore workaround once the SDK fixes request tracing.
             Activity.Current = null;
-            activity = ObservabilityActivitySource.Instance.StartActivity(
-                $"release-evidence-reviewer.{operationId}",
-                ActivityKind.Internal);
-            activity ??= new Activity($"release-evidence-reviewer.{operationId}")
-                .SetIdFormat(ActivityIdFormat.W3C)
-                .Start();
-        }
-        catch
-        {
-            Activity.Current = previousActivity;
-            throw;
-        }
 
-        activity.SetTag("observability.span.kind", "workflow");
-        activity.SetTag("gen_ai.operation.name", "invoke_agent");
-        activity.SetTag("agent.template.id", "release-evidence-reviewer");
-        activity.SetTag("agent.operation.id", operationId);
-        var traceId = activity.TraceId.ToHexString();
-
-        try
-        {
-            var tools = new AssistantTools(knowledgeBase, message, context?.Project);
+            // Keep tool-call history, the reviewed project and the verdict separate for each request.
+            var assistantTools = new AssistantTools(knowledgeBase, message, context?.Project);
+            // Register C# methods as tools; their [Description] attributes guide the model's use.
+            var tools = new List<AITool>
+            {
+                AIFunctionFactory.Create(assistantTools.SearchKnowledgeBase),
+                AIFunctionFactory.Create(assistantTools.CheckReleaseReadiness),
+            };
+            // Run tools requested by the model, then send their results back for the next model response.
             var boundedClient = new FunctionInvokingChatClient(chatClient)
             {
+                // This client allows a final answer-only request: three iterations can mean four model calls.
                 MaximumIterationsPerRequest = 3,
                 MaximumConsecutiveErrorsPerRequest = 0,
                 AllowConcurrentInvocation = false,
                 IncludeDetailedErrors = false,
             };
-            AIAgent agent = boundedClient.AsAIAgent(new ChatClientAgentOptions
+            var agent = boundedClient.AsAIAgent(new ChatClientAgentOptions
             {
                 Name = appName,
+                // Reuse our bounded tool loop; MAF should not add another one.
                 UseProvidedChatClientAsIs = true,
                 ChatOptions = new ChatOptions
                 {
+                    // The model's instructions. AssistantTools also enforces project scope and call limits in code.
                     Instructions = """
                         You are the Release Evidence Reviewer. You assess documented evidence,
                         never approve or perform a release. Use real tools for every answer.
@@ -100,21 +91,18 @@ public class AgentRuntime(IChatClient chatClient, KnowledgeBase knowledgeBase, s
                         both documented. There are at most six tool calls; do not repeat a
                         successful call. Do not claim writes, approvals or live system access.
                         """,
-                    Tools = new List<AITool>
-                    {
-                        AIFunctionFactory.Create(tools.SearchKnowledgeBase),
-                        AIFunctionFactory.Create(tools.CheckReleaseReadiness),
-                    },
+                    // Add argument/result spans when tracing and content capture are on. SDK 1.4.0 records each tool
+                    // twice but executes it once; an SDK fix is expected to remove the duplicate recording.
+                    Tools = recordToolContent ? tools.AddToolObservability() : tools,
                 },
             });
-            if (tracingEnabled)
-                agent = agent.AsBuilder().UseOpenTelemetry(
-                    sourceName: ObservabilityTracer.SourceName,
-                    configure: tracing => tracing.EnableSensitiveData = recordContent).Build();
-            using var telemetryLifetime = agent as OpenTelemetryAgent;
+            // Each request starts a new, empty session; the server stores no conversation.
+            // For a follow-up, the page sends the project and the last question and answer as context.
             var session = await agent.CreateSessionAsync(cancellationToken: deadline.Token);
-            var answer = new StringBuilder();
+            // Send the message and context as user data; evidence comes only from tool results.
             var input = JsonSerializer.Serialize(new { message, context }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            // Collect streamed text into one reply; the chat client handles tool calls between model responses.
+            var answer = new StringBuilder();
             await foreach (var update in agent.RunStreamingAsync(
                                input,
                                session,
@@ -124,45 +112,31 @@ public class AgentRuntime(IChatClient chatClient, KnowledgeBase knowledgeBase, s
                 if (answer.Length > 8_000) throw new InvalidOperationException("answer_too_long");
             }
 
+            // Return the answer only when a tool actually ran and no call was rejected.
             var text = answer.ToString().Trim();
-            if (text.Length == 0 || tools.ToolsUsed.Count == 0 || tools.RejectedCall)
+            if (text.Length == 0 || assistantTools.ToolsUsed.Count == 0 || assistantTools.RejectedCall)
                 throw new InvalidOperationException("grounded_answer_required");
-
-            // Counts and the typed verdict only: how much evidence backed the answer,
-            // never the evidence text itself.
-            activity.SetTag("agent.tool.count", tools.ToolsUsed.Count);
-            if (tools.Evidence is { } evidence)
-            {
-                activity.SetTag("agent.source.count", evidence.Sources.Count);
-                activity.SetTag("agent.readiness.status", evidence.Status);
-            }
-            activity.SetStatus(ActivityStatusCode.Ok);
-            return new AgentReply(text, traceId, tools.ReviewedProject ?? tools.SelectedProject,
-                tools.ToolsUsed, tools.Evidence);
+            return new AgentReply(text, assistantTools.ReviewedProject ?? assistantTools.SelectedProject,
+                assistantTools.ToolsUsed, assistantTools.Evidence);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            activity.SetStatus(ActivityStatusCode.Error, "request_cancelled");
             throw;
         }
         catch (OperationCanceledException ex)
         {
-            activity.SetStatus(ActivityStatusCode.Error, "agent_deadline_exceeded");
-            throw new AgentRunException(traceId, ex, "agent_deadline_exceeded");
+            throw new AgentRunException(ex, "agent_deadline_exceeded");
         }
         catch (Exception ex)
         {
-            activity.SetStatus(ActivityStatusCode.Error, "agent_run_failed");
-            throw new AgentRunException(traceId, ex);
+            throw new AgentRunException(ex);
         }
-        finally
-        {
-            activity.Dispose();
-            Activity.Current = previousActivity;
-        }
+        // Restore the caller's tracing context even after an error or cancellation.
+        finally { Activity.Current = previous; }
     }
     public static string Validate(string? message, ReviewContext? context)
     {
+        // Bound the message and the optional project and prior exchange before any model call.
         message = message?.Trim();
         if (string.IsNullOrWhiteSpace(message)) throw new ArgumentException("message_required");
         if (message.Length > 4_000) throw new ArgumentException("message_too_long");
@@ -177,12 +151,11 @@ public class AgentRuntime(IChatClient chatClient, KnowledgeBase knowledgeBase, s
 }
 
 public sealed record ReviewContext(string? Project = null, string? Question = null, string? Answer = null);
-public sealed record AgentReply(string Answer, string TraceId, string? Project, IReadOnlyList<string> ToolsUsed,
+public sealed record AgentReply(string Answer, string? Project, IReadOnlyList<string> ToolsUsed,
     ReadinessEvidence? Evidence = null);
 
-public sealed class AgentRunException(string traceId, Exception innerException, string code = "agent_run_failed")
+public sealed class AgentRunException(Exception innerException, string code = "agent_run_failed")
     : Exception(code, innerException)
 {
-    public string TraceId { get; } = traceId;
     public string Code { get; } = code;
 }

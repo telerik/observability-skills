@@ -95,7 +95,8 @@ contents of only the files you will edit outside the project. Correct the
 general local rule/instruction, never hard-code the tested answer.
 
 Do not change docs/data, smoke prompts/markers, chosen checks or expectations,
-fixed runtime/UI, dependencies, scope, adapters, or credentials. No cosmetic
+approved hosts under `Capabilities`, fixed runtime/UI, dependencies, scope,
+adapters, or credentials. No cosmetic
 rewrites, additional interview, or second repair. Larger issues remain a brief
 handoff limitation. Do not narrow the accepted Purpose to make a test pass.
 

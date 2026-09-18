@@ -3,13 +3,17 @@ using System.Text.RegularExpressions;
 
 namespace ReleaseEvidenceReviewer;
 
+/// <summary>
+/// The tools the model can call, registered in AgentRuntime. The model chooses a tool and its arguments from the
+/// [Description] text. One instance per request: only the project named in the current message, or the selected
+/// project when no other is named, can be searched or reviewed. CheckReleaseReadiness also records the typed
+/// verdict (each requirement, its documented value and source file) that the page shows beside the answer.
+/// </summary>
 public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage = null, string? selectedProject = null)
 {
     private readonly List<string> _toolsUsed = [];
     public IReadOnlyList<string> ToolsUsed => _toolsUsed.ToArray();
     public string? ReviewedProject { get; private set; }
-    /// <summary>The typed verdict behind the answer, so the UI shows the same
-    /// documented facts the model was given rather than re-deriving them.</summary>
     public ReadinessEvidence? Evidence { get; private set; }
     public bool RejectedCall { get; private set; }
     public string? SelectedProject => selectedProject is not null && AllowedProject(selectedProject)
@@ -22,6 +26,7 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
         Record(nameof(SearchKnowledgeBase));
         if (string.IsNullOrWhiteSpace(query) || query.Length > 4_000)
         { RejectedCall = true; throw new ArgumentException("invalid_search_query"); }
+        // Search only the policy plus the projects this request allows; a fresh unnamed review gets the policy alone.
         var projects = requestMessage is null ? [] : knowledgeBase.ProjectNames.Where(AllowedProject).ToArray();
         var sources = requestMessage is null ? null : projects.Select(name => "project-" + name)
             .Append("readiness-policy").ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -36,6 +41,7 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
         Record(nameof(CheckReleaseReadiness));
         if (string.IsNullOrWhiteSpace(projectName) || projectName.Length > 100)
         { RejectedCall = true; throw new ArgumentException("invalid_project_name"); }
+        // A project the current message did not name or select is rejected, so the model cannot guess one.
         if (!AllowedProject(projectName))
         { RejectedCall = true; throw new InvalidOperationException("project_not_requested"); }
         var slug = NormalizeProjectName(projectName);
@@ -53,6 +59,7 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
             return $"status=not_found; project={DisplayName(slug)}; reason=readiness_policy_missing";
         }
 
+        // Ready requires an approved security review and an assigned rollback owner; anything else is Blocked.
         var securityApproval = ReadField(projectEvidence, "Security approval");
         var rollbackOwner = ReadField(projectEvidence, "Rollback owner");
         var securityApproved = string.Equals(
@@ -77,6 +84,7 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
     private void RecordEvidence(string status, string slug, string? securityApproval, bool securityApproved,
         string? rollbackOwner, bool ownerAssigned)
     {
+        // Keep the typed verdict behind the answer, so the page shows the same documented facts the model received.
         var source = $"project-{slug}";
         Evidence = new(status, DisplayName(slug),
             [new("Security approval", securityApproval, securityApproved, source),
@@ -86,6 +94,7 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
 
     private void Record(string tool)
     {
+        // At most six tool calls per request; a rejected call makes AgentRuntime fail the run.
         if (_toolsUsed.Count >= 6)
         { RejectedCall = true; throw new InvalidOperationException("tool_call_limit_exceeded"); }
         _toolsUsed.Add(tool);
@@ -93,6 +102,7 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
 
     private bool AllowedProject(string name)
     {
+        // Allow the project named in the current message, or the selected project when no other project is named.
         if (requestMessage is null || Mentions(name)) return true;
         var slug = NormalizeProjectName(name);
         if (selectedProject is null || slug != NormalizeProjectName(selectedProject)) return false;
@@ -105,6 +115,7 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
 
     private bool Mentions(string name)
     {
+        // Match the name against runs of consecutive words, ignoring case and punctuation.
         var slug = NormalizeProjectName(name);
         var words = Regex.Matches(requestMessage!, @"[\p{L}\p{N}]+").Select(match => match.Value.ToLowerInvariant()).ToArray();
         for (var start = 0; start < words.Length; start++)
@@ -135,6 +146,7 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
 
     private static string? ReadField(string markdown, string field)
     {
+        // Read a "Field: value" line from the evidence Markdown, ignoring list markers.
         foreach (var rawLine in markdown.Split('\n'))
         {
             var line = rawLine.Trim().TrimStart('-', '*').Trim();
@@ -146,7 +158,6 @@ public class AssistantTools(KnowledgeBase knowledgeBase, string? requestMessage 
     }
 }
 
-/// <summary>One release requirement, its documented value, and the file it came from.</summary>
 public sealed record EvidenceCheck(string Requirement, string? DocumentedValue, bool Satisfied, string SourceId);
 public sealed record ReadinessEvidence(string Status, string Project,
     IReadOnlyList<EvidenceCheck> Checks, IReadOnlyList<string> Sources);

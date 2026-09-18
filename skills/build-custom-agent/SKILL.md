@@ -1,6 +1,6 @@
 ---
 name: build-custom-agent
-description: Build a bounded .NET 10 local agent prototype from a short Purpose. For requests requiring live access, real effects, or complex orchestration, offer an integration plan and, when meaningful, a separately confirmed simplified mock PoC. Use for the custom-agent path, not a ready template or an existing app.
+description: Build a bounded .NET 10 local agent prototype from a short Purpose. For requests requiring live business-system access, credentials, real effects, or complex orchestration, offer an integration plan and, when meaningful, a separately confirmed simplified mock PoC. Use for the custom-agent path, not a ready template or an existing app.
 ---
 
 # Build a custom agent
@@ -10,6 +10,14 @@ plan in chat. It never implements live business-system access or real effects.
 `Try-and-refine: on|off` is an optional workflow preference, not Purpose; retain
 the latest explicit value across revisions and path changes without asking for it.
 When unspecified, offer it only after the local prototype is ready.
+
+Throughout intake, build, testing, and troubleshooting, never run
+`dotnet user-secrets list`, read secret-store files, or dump environment values.
+This also forbids listing only key names, checking which keys exist, or filtering
+or redacting the output: those operations still inspect the secret store.
+Run the documented app or smoke command directly and let the app report missing
+configuration. Report only the missing key names and refer to the README;
+never request, inspect, or print credential values.
 
 When Purpose is present, read `references/scope-routing.md` without a scenario
 summary. For a complex path choice, go directly to the question tool: its body
@@ -21,28 +29,41 @@ contains the scope explanation. Do not duplicate that explanation in commentary.
 
    > In 1-2 short sentences, what should this agent help someone accomplish?
 
-2. Apply the routing reference. Infer a bounded Name, Knowledge, and no more
-   than three Actions. Ask at most its one permitted ambiguity clarification;
-   never ask for credentials or secret values.
+2. Apply the routing reference and verify requested capabilities against the
+   relevant starter implementation. Infer a bounded Name, Knowledge, and no
+   more than three Actions. Reading a public HTTPS API without credentials is
+   network access the user must approve before the build; process execution,
+   file writes, and environment or secret reads cannot be granted. Ask at most
+   the one permitted ambiguity clarification; never ask for credentials or
+   secret values.
 
-3. A buildable request gets a compact **Proposed local prototype** containing
-   Purpose, Name, Knowledge, and Actions. Say which sources are user-supplied
-   and which are mock, and that no live adapter will be used. Nothing is built
-   yet. A complex/live request instead gets only the reference's scope-first
-   question; do not show a plan preview or four-field block.
+3. A buildable request gets a compact **Proposed local prototype** in chat using
+   the reference's Markdown layout. Say which sources are user-supplied and
+   which are mock, which hosts need network access, and that no live adapter
+   will be used. Before Build/Revise, disclose any requested capability being
+   simplified or deferred, its local substitute, and what will not be built.
+   Nothing is built yet. A complex/live request instead gets only the
+   reference's scope-first question; do not show a plan preview or proposal
+   block.
 
    Use exactly the applicable two choices:
 
    | Situation | Choices |
    |---|---|
    | Local proposal | `Build proposed agent` / `Revise proposed agent` |
-   | Complex request with a useful bounded mock slice | `Show implementation plan` / `Propose a simplified mock PoC` |
-   | Complex request without an eligible mock slice | `Show implementation plan` / `Revise proposed agent` |
+   | Local proposal with network access | `Approve network access and build` / `Revise proposed agent` |
+   | Complex request with a useful bounded mock slice and mocks not rejected | `Show implementation plan` / `Propose a simplified mock PoC` |
+   | Complex request without an eligible mock slice or with mocks rejected | `Show implementation plan` / `Revise proposed agent` |
 
-   Use the host's question tool when available. For a local proposal, ask
-   `How would you like to continue?` with exactly the Build/Revise labels. For
-   a complex request, put the scope explanation and that question together in
-   the tool's question body, with the applicable structured choices. If no
+   In the same turn as the proposal, call the host's question tool (for example
+   `vscode_askQuestions` in VS Code or `ask_user` in Copilot CLI) with only
+   `How would you like to continue?` and exactly the applicable labels. Do not
+   move or repeat the proposal inside the picker, and never end the turn with
+   that question as plain text while a question tool exists. With network
+   access listed, that click approves exactly the listed hosts; adding a host
+   later needs a new proposal and approval.
+   For a complex request, put the scope explanation and that question together
+   in the tool's question body, with the applicable structured choices. If no
    question tool exists, present the same context and two numbered choices.
    Wait for the user's answer. Cancellation, empty input, or tool failure
    selects nothing.
@@ -55,9 +76,10 @@ contains the scope explanation. Do not duplicate that explanation in commentary.
    - `Propose a simplified mock PoC`: show the reduced four fields plus excluded
      behavior, then ask Build/Revise and wait. Preserve the full goal for
      `INTEGRATION_PLAN.md`; do not restart intake or create files.
-   - `Build proposed agent`: approve only the latest displayed local scope.
-     Begin without more customization questions; prerequisites may still stop it.
-   - `Show implementation plan`: follow the zero-write plan section.
+   - `Build proposed agent` or `Approve network access and build`: approve only
+     the latest displayed local scope, including its listed hosts. Begin without
+     more customization questions; prerequisites may still stop it.
+   - `Show implementation plan`: read and follow `references/plan-only.md`.
    - `Revise proposed agent`: use the reference's one-reply revision, reroute,
      and ask the appropriate next choice.
 
@@ -82,13 +104,20 @@ overwrite content, reconstruct the starter, or source/copy a parent `.env`.
 Edits are limited to:
 
 - `AgentDefinition.cs`: its bounded definition and one-to-three registrations;
-- `Tools.cs`: at most three deterministic local or clearly mock tools;
+- `Tools.cs`: at most three side-effect-free local, mock, or approved-host tools;
 - regular `.md`/`.txt` files under `docs/` and `.json`/`.csv` under `data/`;
-- `appsettings.json`: `Content:Sources`, `Agent`, and the three fixed `Smoke`
-  cases. `Content:Sources` must map every content path exactly once to `mock` or
+- `appsettings.json`: `Content:Sources`, `Capabilities:Network:AllowedHosts`
+  (only the approved hosts), `Agent`, and the three fixed `Smoke` cases.
+  `Content:Sources` must map every content path exactly once to `mock` or
   `supplied`; use `supplied` only for files the user provided;
 - `INTEGRATION_PLAN.md`, required only for an external-source prototype or
   simplified mock PoC.
+
+Remove starter content and tools the approved scope does not use; an agent whose
+tools only compute or read approved hosts declares no content. Never add content,
+citations, provenance lines, instructions, or markers only to satisfy the
+validator or a smoke; if a check cannot pass honestly, stop and report it. Keep
+the summary comment of each file you change accurate.
 
 Choose UI preset `knowledge` for Q&A, `review` for evidence checking,
 `workflow` for triage/process work, or `analysis` for summaries/metrics. Keep
@@ -99,34 +128,35 @@ a requirement for one case must not become a requirement for all cases.
 Every literal `docs/` or `data/` reference must resolve.
 
 All other files are fixed, including runtime and standard SDK instrumentation,
-HTTP/UI/health, project/packages, and smoke engine. Add no dependencies. Generate
-no external calls, process execution, file writes, secret reads, live effects,
-or background control loops. Do not use an installed adapter, connector, or MCP
-tool during intake, build, or smoke. Azure OpenAI and Progress runtime settings
-remain as documented user-secrets. The validator checks project structure,
-configuration, declared content, and smoke expectations; it does not analyze
+HTTP/UI/health, project/packages, capabilities, and smoke engine. Add no
+dependencies. Generate no process execution, file writes, secret reads, live
+effects, or background control loops. Do not use an installed adapter,
+connector, or MCP tool during intake, build, or smoke. Azure OpenAI and Progress
+runtime settings remain as documented user-secrets. The validator checks project
+structure, settings shape and fixed values, declared content and hosts, and
+smoke expectations; app startup checks the `Agent` values. It does not analyze
 editable C# or establish its safety.
 
-Preserve the fixed tracing setup: Progress exports agent/chat `UseOpenTelemetry`
-spans, and `FunctionInvokingChatClient` supplies tool spans under the agent.
-Tool-only responses may have empty Output text; their structured calls are
-recorded by the SDK. Add no separate tool wrapper.
-`Progress:Observability:RecordInputs` and `Progress:Observability:RecordOutputs`
-default to `true`. Setting either flag to `false` disables both directions of
-agent/chat/tool content; use the README's process-specific overrides when
-requested. SDK exception text remains outside these switches.
+Network access goes only through the `ApprovedHttpClient` that `CreateTools`
+receives, to the hosts under `Capabilities:Network:AllowedHosts`. Before writing
+a tool that calls a host, read `references/network-tools.md`. Never create an
+`HttpClient` or add API keys or logins; an API that needs them is a complex request.
 
-For mock PoCs, keep the reduced scope and mock limitation visible in Purpose,
-instructions, answers, and handoff. `INTEGRATION_PLAN.md` contains only the
-separate developer continuation; never execute it during this build.
+Preserve the fixed tracing setup (one `AddObservability()` chat-client wrapper,
+`AddToolObservability()` when content capture is on, the `AgentRuntime` activity
+reset); add no other wrapper. `Progress:Observability:RecordInputs` and
+`Progress:Observability:RecordOutputs` default to `true`; setting either to
+`false` disables all recorded content (use the README's overrides when
+requested). SDK exception text stays outside these switches.
 
 ## Required gates
 
 Before building, review `AgentDefinition.cs` and `Tools.cs`: confirm the accepted
-local/mock scope, one to three local functions, and that literal `docs/` and
-`data/` paths resolve. Check for external calls, process execution, file writes,
-secret access, live effects, or background loops and remove any that were added.
-Do not treat a validator pass as a substitute for this review.
+scope, one to three functions, and that literal `docs/` and `data/` paths
+resolve. Network access must go only through `ApprovedHttpClient` to the approved
+hosts; remove any other external calls, process execution, file writes, secret
+access, live effects, or background loops. A validator pass is not a substitute
+for this review.
 
 Validate before building. Once that passes, copy the current
 `appsettings.json` to a temporary `smoke-baseline.json` outside the project,
@@ -144,10 +174,14 @@ dotnet run --project <target>/CustomAgent.csproj -- --smoke
 Require one `SMOKE_REPORT=<json>` with overall `pass` and exactly the passing
 IDs `knowledge`, `tool`, `not-found`. Prompts are ordinary questions; expected
 markers remain separate and use stable facts/source paths, not internal
-diagnostic tokens. Preserve trace IDs as local execution evidence. Smokes do
-not prove reasoning quality, actual tool invocation, ingestion, live outcomes,
-or production safety. On missing configuration, name only the missing keys and
-refer to the README; never inspect or print values.
+diagnostic tokens. Each case needs one marker of four or more characters that is
+not in its prompt or, for `knowledge` and `tool`, in `Agent:Instructions`; with
+declared content, `knowledge` also needs a `docs/` or `data/` path marker. A
+case passes only when a registered tool returned a result and every marker is in
+the answer. Smokes do not prove the right tool, reasoning quality, ingestion,
+live outcomes, or production safety. On missing configuration, follow the
+credential-handling rule above; do not inspect configuration as a prerequisite
+check.
 
 Resolve the copied project directory to `<absolute-target>`. Start the built app
 persistently on an OS-assigned loopback port using that absolute path, regardless
@@ -177,72 +211,9 @@ an already healthy process. Finally validate again:
 dotnet run --file <skill-directory>/scripts/validate-project.cs -- --target <target> --smoke-baseline <snapshot>
 ```
 
-## Optional try and refine
+## After the required gates
 
-After all required gates pass, verify `/` and `/api/health` at the running app's
-URL. Show a brief readiness summary with the project path, clickable UI link
-and three passing smoke results before considering this optional phase.
-
-- Explicit `Try-and-refine: on`: run once without asking again.
-- Explicit `Try-and-refine: off`: proceed to handoff with
-  `Behavior check: skipped (off)`.
-- No preference: reuse the working question-tool format from Build/Revise with
-  `Finish here` and `Run try-and-refine`. Put the readiness summary (project
-  path, clickable UI link and three passing smoke results) and this question
-  together in the tool's question body:
-
-  > Would you like me to try four additional scenarios and make one small fix
-  > if needed? This makes extra model calls and may take several minutes.
-
-  Without a question tool, present the same context and two choices in chat.
-  Keep the app running while awaiting the answer. Only `Run try-and-refine` or an equivalent
-  explicit request approves execution. `Finish here`, cancellation, empty input
-  or a failed question tool proceeds to handoff with
-  `Behavior check: not run (no opt-in)`; never infer approval or ask repeatedly.
-  In noninteractive mode, finish without this question or phase unless already
-  explicitly requested.
-
-Only after opt-in, read and follow
-[the behavior-check procedure](references/try-and-refine.md); prepare its
-scenarios and start its time budget then. If unavailable, report it skipped
-without reconstructing it. Plan-only requests and failed required gates never
-reach this offer. This preference is not a generated setting, and declining it
-does not invalidate a successful basic build.
-
-## Handoff
-
-After all checks, including optional behavior checks, leave the app running
-in the persistent session. If it was stopped, relaunch using the
-persistent-start procedure above. Immediately before the final response, verify
-both `/` and `/api/health` at its current URL, then include a clickable UI link.
-Do not stop the app as test cleanup or substitute a launch command for a live link.
-
-Report success only after copy, both validations, build, all smokes, and health.
-Include the absolute project path, verified UI URL, three smoke results with
-their emitted trace IDs, and exactly one link:
-`https://observability.progress.com/observations`. Do not make
-per-trace links; state that backend trace ingestion is not independently
-verified. For external/mock prototypes, name mock and supplied sources, confirm
-no live adapter was used, link `INTEGRATION_PLAN.md`, and distinguish tested
-sample decisions from unvalidated production behavior.
-
-Append this note verbatim to the successful local-prototype handoff:
-
-> **Development use only:** This agent is in a local development environment. .NET user-secrets stores credentials unencrypted in a JSON file in your user profile. For production deployment, inject credentials through environment variables backed by your deployment’s secret manager.
-> If you used user-secrets or entered credentials directly in terminal commands, I can guide you through removing the saved development credentials and relevant shell-history entries when you finish testing.
-
-Keep the cleanup offer conditional: a successful run does not establish that
-user-secrets were used. Do not inspect secret-store contents or shell history
-to decide. Perform cleanup only when requested, after testing; explain that
-`Progress.AgentBuilder.Mvp` is shared across all five agents before removing
-settings. Refer to the copied README for targeted removal and shell-specific
-guidance; do not automatically clear the store or unrelated shell history.
-
-## Integration plan only
-
-After `Show implementation plan`, create no files and run no copier, build,
-smoke, app, trace, credential, or external-system commands. Return a concise
-chat plan covering MAF shape, adapters, authentication/permissions, data
-contracts, effect controls, failures, tests, deployment, observability, and
-developer ownership. Preserve requested automation; label safer alternatives
-as changed assumptions rather than implying acceptance.
+Before any further message to the user, read and follow
+`references/finish.md`: the readiness summary, the optional try-and-refine
+offer, and the handoff with its required note. Plan-only requests and failed
+required gates never reach it.

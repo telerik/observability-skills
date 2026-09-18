@@ -3,8 +3,9 @@ using Microsoft.Extensions.AI;
 namespace CustomAgent;
 
 /// <summary>
-/// The bounded customization seam. Keep identity and instructions in
-/// appsettings.json, and register at most three local or simulated tools here.
+/// The agent's identity, purpose, instructions and example prompts, loaded from the Agent section of
+/// appsettings.json, and the tools Program.cs registers with the agent (one to three AIFunction tools). CreateTools
+/// receives the local content and the HTTP client that reaches only the approved hosts.
 /// </summary>
 public sealed record AgentDefinition(
     string DisplayName,
@@ -37,8 +38,10 @@ public sealed record AgentDefinition(
         return new AgentDefinition(displayName, serviceSlug, purpose, instructions, examples);
     }
 
-    public IList<AITool> CreateTools(KnowledgeBase knowledgeBase)
+    public IList<AITool> CreateTools(KnowledgeBase knowledgeBase, ApprovedHttpClient http)
     {
+        // The starter tools read local content only. A tool that calls an approved host takes http as well; it
+        // rejects every other host (Capabilities:Network:AllowedHosts in appsettings.json).
         var tools = new AssistantTools(knowledgeBase);
         return
         [

@@ -2,7 +2,11 @@ using System.Text.RegularExpressions;
 
 namespace DocsQa;
 
-// Deliberately local lexical RAG: no vector service, embeddings or hidden index.
+/// <summary>
+/// Load reads the bundled Markdown files in docs/; the constructor splits documents that are already in memory into
+/// sections and searches them by matching words. Deliberately local lexical RAG: no vector service, embeddings or
+/// hidden index.
+/// </summary>
 public class DocumentStore
 {
     private static readonly HashSet<string> StopWords = new(
@@ -12,16 +16,11 @@ public class DocumentStore
     public IReadOnlyList<DocumentSection> Sections => _sections.Values.ToArray();
     public int DocumentCount { get; }
 
-    public DocumentStore(string folder)
+    public DocumentStore(IReadOnlyList<(string DocumentId, string Markdown)> documents)
     {
-        if (!Directory.Exists(folder)) return;
-        var files = Directory.GetFiles(folder, "*.md").Order(StringComparer.Ordinal).ToArray();
-        if (files.Length > 20) throw new InvalidOperationException("corpus_too_large");
-        DocumentCount = files.Length;
-        foreach (var file in files)
+        DocumentCount = documents.Count;
+        foreach (var (documentId, markdown) in documents)
         {
-            if (new FileInfo(file).Length > 65_536) throw new InvalidOperationException("document_too_large");
-            var documentId = Path.GetFileNameWithoutExtension(file);
             var title = documentId;
             string? heading = null;
             var lines = new List<string>();
@@ -34,7 +33,8 @@ public class DocumentStore
                 if (!_sections.TryAdd(id, new(id, documentId, title, heading, excerpt)))
                     throw new InvalidOperationException("duplicate_source_id");
             }
-            foreach (var line in File.ReadLines(file))
+            // Each ## heading starts a section; the document ID (file name) and heading form its source ID.
+            foreach (var line in markdown.ReplaceLineEndings("\n").Split('\n'))
             {
                 if (line.StartsWith("# ", StringComparison.Ordinal)) title = line[2..].Trim();
                 else if (line.StartsWith("## ", StringComparison.Ordinal))
@@ -49,12 +49,23 @@ public class DocumentStore
         }
     }
 
+    public static DocumentStore Load(string folder)
+    {
+        // A missing folder gives an empty store; the corpus is capped at 20 files of at most 64 KiB each.
+        if (!Directory.Exists(folder)) return new DocumentStore([]);
+        var files = Directory.GetFiles(folder, "*.md").Order(StringComparer.Ordinal).ToArray();
+        if (files.Length > 20) throw new InvalidOperationException("corpus_too_large");
+        if (files.Any(file => new FileInfo(file).Length > 65_536)) throw new InvalidOperationException("document_too_large");
+        return new DocumentStore(files.Select(file => (Path.GetFileNameWithoutExtension(file), File.ReadAllText(file))).ToArray());
+    }
+
     public IReadOnlyList<DocumentSection> Search(string query, int limit = 4, string? sourceId = null)
     {
         ValidateQuestion(query);
         if (limit is < 1 or > 4) throw new ArgumentException("invalid_result_limit");
         var terms = Tokenize(query);
         if (terms.Count == 0) return [];
+        // Give heading/title matches more weight; sort tied scores by source ID for consistent results.
         return _sections.Values.Where(section => sourceId is null || section.SourceId == sourceId).Select(section => new
         {
             Section = section,
@@ -72,6 +83,7 @@ public class DocumentStore
     {
         if (string.IsNullOrWhiteSpace(sourceId) || sourceId.Length > 160)
             throw new ArgumentException("invalid_source_id");
+        // Resolve IDs only against the sections loaded at startup.
         return _sections.GetValueOrDefault(sourceId);
     }
 

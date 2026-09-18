@@ -2,6 +2,10 @@ using System.Text.Json;
 
 namespace OperationsDataAnalyst;
 
+/// <summary>
+/// Runs the three --smoke cases through the same ViewWorkflow as a dashboard click, each with a fixed view.
+/// Prints one SMOKE_REPORT line; exit code 0 means all passed.
+/// </summary>
 public sealed class SmokeRunner(ViewWorkflow workflow)
 {
     public async Task<int> RunAsync()
@@ -34,15 +38,20 @@ public sealed class SmokeRunner(ViewWorkflow workflow)
             try
             {
                 var reply = await workflow.AskAsync(new(scenario.Prompt, scenario.View, ApprovedView: scenario.View));
+                // Pass only on the exact numbers in the actual tool evidence, not on answer wording alone.
                 var passed = reply.Status == "answered" && reply.View == scenario.View && reply.Chart is not null &&
-                    reply.TraceId.Length == 32 && reply.TraceId != new string('0', 32) && scenario.Passes(reply);
-                results.Add(new(scenario.Id, passed ? "pass" : "fail", reply.TraceId,
+                    scenario.Passes(reply);
+                results.Add(new(scenario.Id, passed ? "pass" : "fail",
                     passed ? "tool_numeric_invariants_observed" : reply.Status != "answered" ? "agent_" + reply.Status :
                         reply.View != scenario.View ? "view_selection_changed" : "required_tool_evidence_missing", reply.Evidence.Select(item => item.Tool).ToArray()));
             }
             catch (AgentRunException error)
             {
-                results.Add(new(scenario.Id, "fail", error.TraceId, "agent_run_failed", []));
+                var reason = error.InnerException is System.ClientModel.ClientResultException { Status: > 0 } azure
+                    ? $"azure_openai_http_{azure.Status}"
+                    : error.InnerException is OperationCanceledException ? "agent_deadline_exceeded" : "agent_run_failed";
+                Console.Error.WriteLine($"SMOKE_FAILURE={reason}");
+                results.Add(new(scenario.Id, "fail", reason, []));
             }
         }
         var status = results.All(result => result.Status == "pass") ? "pass" : "fail";
@@ -58,5 +67,5 @@ public sealed class SmokeRunner(ViewWorkflow workflow)
     }
 
     private sealed record SmokeCase(string Id, string Prompt, ViewSpec View, Func<AnalysisReply, bool> Passes);
-    private sealed record SmokeResult(string CaseId, string Status, string TraceId, string Reason, string[] Tools);
+    private sealed record SmokeResult(string CaseId, string Status, string Reason, string[] Tools);
 }

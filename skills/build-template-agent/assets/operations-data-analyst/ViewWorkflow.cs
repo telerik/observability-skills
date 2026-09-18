@@ -1,5 +1,9 @@
 namespace OperationsDataAnalyst;
 
+/// <summary>
+/// Validates an analysis request and hands it to AgentRuntime. ViewRules below owns the chart selection: merging and
+/// validating views, building chart data and metric tiles, and finding the peak and low of the plotted series.
+/// </summary>
 public class ViewWorkflow(AgentRuntime runtime, MetricsStore metrics)
 {
     public ViewRules Rules { get; } = new(metrics);
@@ -23,6 +27,7 @@ public class ViewRules(MetricsStore metrics)
     public ViewSpec Default => new("all", metrics.Start.ToString("yyyy-MM-dd"), metrics.End.ToString("yyyy-MM-dd"));
     public ViewSpec Merge(ViewSpec current, ViewPatch? changes)
     {
+        // Unspecified fields keep the current view; a comparison switches to period grouping and widens the dates.
         if (changes is null) throw new ArgumentException("intent_changes_required");
         if (changes.Grouping is not (null or "day" or "service" or "period")) throw new ArgumentException("unsupported_grouping");
         var service = changes.Service ?? current.Service;
@@ -42,6 +47,7 @@ public class ViewRules(MetricsStore metrics)
     }
     public ViewSpec Validate(ViewSpec? view)
     {
+        // Normalize service and dates; comparison windows must be ordered and inside the selected range.
         if (view is null) throw new ArgumentException("view_required");
         var selection = metrics.NormalizeSelection(view.Service, view.Start, view.End);
         if (selection.Service != "all" && !metrics.Services.Contains(selection.Service)) throw new ArgumentException("unknown_view_service");
@@ -77,14 +83,11 @@ public class ViewRules(MetricsStore metrics)
         return new(view, dashboard, chart, Highlights(view, dashboard, chart));
     }
 
-    /// <summary>
-    /// The four tiles beside the chart, derived from the series the question produced, so they
-    /// describe the selected metric instead of a fixed set. Every value is an aggregate that was
-    /// actually computed: percentiles take the nearest rank rather than interpolating a value no
-    /// day recorded, and a difference between percentages is reported in percentage points.
-    /// </summary>
     public static IReadOnlyList<Highlight> Highlights(ViewSpec view, DashboardResult dashboard, ChartData chart)
     {
+        // The four tiles beside the chart come from the plotted series, so they describe the selected metric instead
+        // of a fixed set. Every value is actually computed: percentiles take the nearest rank rather than
+        // interpolating a value no day recorded, and differences between percentages are percentage points.
         var unit = chart.Unit;
         var difference = unit == "%" ? "pp" : unit;
         var plotted = chart.Points.Count + (view.Grouping == "day" ? " day" : " service") + (chart.Points.Count == 1 ? "" : "s");
@@ -132,12 +135,10 @@ public class ViewRules(MetricsStore metrics)
         return [new($"{periods.BeforeStart} → {periods.BeforeEnd}", Value(result.Before, view.Metric)),
             new($"{periods.AfterStart} → {periods.AfterEnd}", Value(result.After, view.Metric))];
     }
-    /// <summary>
-    /// Peak and low of the exact plotted series, so an extreme can never disagree
-    /// with the chart. Undefined points are skipped, never treated as zero.
-    /// </summary>
     public static (MetricExtreme? Peak, MetricExtreme? Lowest) Extremes(ChartData chart)
     {
+        // Peak and low of the exact plotted series, so an extreme never disagrees with the chart.
+        // Undefined points are skipped, never treated as zero; ties keep every matching label.
         var known = chart.Points.Where(point => point.Value is not null).ToArray();
         if (known.Length == 0) return (null, null);
         var highest = known.Max(point => point.Value!.Value);

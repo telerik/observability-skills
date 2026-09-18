@@ -2,7 +2,9 @@
 
 A bounded .NET 10 starter for an agent grounded in supplied local files or mock
 data. It does not connect to or update a live business system, even if you
-already have an adapter or connector configured.
+already have an adapter or connector configured. Its only outside access is
+read-only requests to the hosts approved in `appsettings.json`
+(see [Capabilities](#capabilities)).
 
 For a simplified mock PoC, only the agreed local decision logic is demonstrated.
 Mock inputs and assumed rules do not validate real outcomes or production
@@ -51,6 +53,28 @@ If credentials were entered in terminal commands, remove those history entries
 in the original shell. In Bash, use `history -d <entry-number>` then `history -w`;
 other open sessions may retain entries.
 
+## Project files
+
+A chat message moves from the page to `POST /api/chat` in `Program.cs`, which
+bounds the history with `ChatHistory.cs` and runs `AgentRuntime.cs`. The Microsoft
+Agent Framework (MAF) agent, built once in `Program.cs`, calls the tools in
+`Tools.cs` to search and read the local content loaded by `KnowledgeBase.cs`. A
+tool that needs an approved host calls it through the client in `Capabilities.cs`.
+
+| Path | What it does |
+|---|---|
+| `Program.cs` | Startup: settings, Azure OpenAI chat client, Progress tracing, the MAF agent and its tool loop, HTTP endpoints or `--smoke` |
+| `AgentRuntime.cs` | Runs one chat turn or smoke case with a deadline and answer limit; the fixed response policy |
+| `AgentDefinition.cs` | The agent's identity, instructions and examples from `appsettings.json`, and the tools it registers |
+| `Tools.cs` | `SearchLocalContent`, `ReadLocalSource` and `LookupLocalRecord`, the tools the model calls |
+| `KnowledgeBase.cs` | Loads the declared `docs/` and `data/` files and searches them by matching words |
+| `Capabilities.cs` | The approved `Capabilities` from `appsettings.json` and `ApprovedHttpClient`, which reaches only the approved hosts |
+| `ChatHistory.cs` | Validates and bounds the chat history the browser sends |
+| `SmokeRunner.cs` | The three configured `--smoke` cases |
+| `appsettings.json` | Agent definition, UI preset, content sources, approved capabilities and smoke cases |
+| `docs/`, `data/` | The local prototype content |
+| `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
+
 ## Build, smoke test, and run
 
 ```bash
@@ -66,22 +90,30 @@ exactly the `knowledge`, `tool`, and `not-found` cases configured in
 at 45 seconds, three tool iterations, 800 output tokens, and 8,000 streamed
 characters.
 
-Tracing uses the Progress SDK exporter with agent/chat `UseOpenTelemetry`
-instrumentation ([SDK documentation](https://www.telerik.com/ai-observability-platform/documentation/sdk/dotnet#iagent)).
-One agent span contains the model requests and real tool executions in order.
-The SDK captures agent input/output and tool arguments/results automatically.
-Static template identifiers use `AdditionalTags` for filtering.
+A smoke case passes when at least one registered tool returned a result and the
+answer contains the expected fragments, which the model is never told. The
+report lists the tools each case used. A pass does not prove the right tool was
+chosen, reasoning quality, or production safety, and it is not proof of backend
+ingestion: find the service, time and matching prompt on the
+[Progress Tracing page](https://observability.progress.com/observations).
+
+## Tracing
+
+When `Progress:Observability:ApiKey` is configured, each chat turn appears in
+Progress Observability as one trace with the agent run, its model calls and its
+tool calls. `Program.cs` adds the Progress SDK through one `AddObservability()`
+wrapper on the chat client and adds `AddToolObservability()` to the registered
+tools to record their arguments and results
+([SDK documentation](https://www.telerik.com/ai-observability-platform/documentation/sdk/dotnet)).
+Adding `UseOpenTelemetry()` as well would duplicate spans. Every span carries the
+`agent.template.id:custom-agent-local-prototype` and `agent.service.slug:<slug>`
+tags for filtering.
 
 `Progress:Observability:RecordInputs` and `Progress:Observability:RecordOutputs`
-default to `true` for the local demo. SDK capture has one combined switch:
-**setting either flag to false disables both input and output content**. The
-health response reports the effective `telemetryRecordContent` value.
-
-Model responses containing only tool calls can have an empty Output text panel.
-The SDK records the structured calls under Tool Calls; the templates add no
-synthetic output text.
-
-To disable content recording for one run:
+default to `true` for the local demo. They act as one switch: **setting either
+flag to false disables all recorded content**, meaning prompts, answers, tool
+arguments and tool results. The health response reports the effective
+`telemetryRecordContent` value. To disable content recording for one run:
 
 ```bash
 PROGRESS__OBSERVABILITY__RECORDINPUTS=false \
@@ -89,18 +121,24 @@ PROGRESS__OBSERVABILITY__RECORDOUTPUTS=false \
 dotnet run --no-build -- --urls http://127.0.0.1:0
 ```
 
-The overrides do not persist. SDK message/tool payloads have no additional
-template truncation. SDK exception text remains outside these content switches.
-The agent's Tool Results panel may remain empty even when results exist in its
-raw output messages. Agent aggregate tokens also repeat model-call usage, so use
-individual model spans when inspecting consumption.
+The overrides do not persist. The template does not truncate recorded content,
+and SDK exception text is not covered by these flags.
 
-A passing smoke run checks execution and expected answer fragments, without
-telling the model those expected answers. It does not prove reasoning quality,
-actual tool use, or production safety. The emitted trace IDs do not independently
-prove backend ingestion; open the
-[Progress Tracing page](https://observability.progress.com/observations) to
-confirm that the traces arrived.
+Reading traces with Progress SDK 1.4.0:
+
+- `AgentRuntime` clears `Activity.Current` for each run and restores it
+  afterwards, because the SDK does not emit its automatic tool spans under the
+  ASP.NET request activity. The Progress trace is therefore not linked to the
+  HTTP request trace.
+- Each tool runs once but appears as two spans: the SDK's automatic span under
+  the `orchestrate_tools` root, with metadata only, and the
+  `AddToolObservability()` span under the agent, with arguments and results.
+  That wrapper ignores the record flags, so `Program.cs` adds it only when
+  content recording is enabled.
+- Parent spans repeat model-call token usage, so the trace token total is higher
+  than actual usage. Use the individual model-call spans to inspect consumption.
+- A model call that only requests tools shows an empty Output text panel; the
+  requested calls appear under Tool Calls.
 
 ## Chat behavior
 
@@ -116,15 +154,45 @@ section headings for citations; the agent can read the full bounded source when
 more context is needed. Citations and model judgments still need review for
 important decisions.
 
+## Capabilities
+
+Tools read the bundled content. The only access beyond it is declared in
+`appsettings.json` and approved by the user before the build:
+
+```json
+"Capabilities": {
+  "Network": {
+    "AllowedHosts": ["api.open-meteo.com"]
+  }
+}
+```
+
+`Program.cs` builds an `ApprovedHttpClient` from that list and passes it to
+`AgentDefinition.CreateTools`. It sends read-only GET requests and refuses any
+other host, plain HTTP outside loopback addresses, credentials in the URL and
+redirects. `GetAsync(url, cancellationToken)` returns every status code with its
+body, so a tool can report data the API does not have; `GetStringAsync` returns
+only a successful body. A refused request, a body over 64 KiB, a request over
+10 seconds, or an unexpected status fails the run, and `--smoke` reports the
+reason, such as `network_host_not_approved` or `network_http_500`. `/api/health`
+lists the approved hosts as `networkHosts`; an empty list means no network access.
+
+Nothing else is granted: no process execution, file writes, or environment or
+secret reads, and no API keys or logins for the approved hosts. When content
+recording is on, tool arguments and results, including the API response, are
+recorded in Progress traces.
+
 ## Customization boundary
 
 The builder may customize `AgentDefinition.cs`, `Tools.cs`, the `Content`,
-`Agent`, and `Smoke` values in `appsettings.json`, supported files under `docs/`
-and `data/`, and an optional `INTEGRATION_PLAN.md`. Every content file must have
-one exact `Content:Sources` entry whose value is `mock` or `supplied`; the fixed
-content loader rejects undeclared files and does not fall back to the working
-directory. The runtime, web routes, UI shell, smoke engine, project dependencies,
-and observability wiring stay fixed.
+`Capabilities:Network:AllowedHosts` (approved hosts only), `Agent`, and `Smoke`
+values in `appsettings.json`, supported files under `docs/` and `data/`, and an
+optional `INTEGRATION_PLAN.md`. Every content file must have one exact
+`Content:Sources` entry whose value is `mock` or `supplied`; the fixed content
+loader rejects undeclared files and does not fall back to the working
+directory. An agent whose tools only compute or read approved hosts declares no
+content. The runtime, web routes, UI shell, smoke engine, approved-host client,
+project dependencies, and observability wiring stay fixed.
 
 The fixed UI reads its title, Purpose, suggested prompts, one of four visual
 presets (`knowledge`, `review`, `workflow`, or `analysis`), and its input hint
@@ -140,8 +208,9 @@ sample logic from the original full scope and deferred developer work.
 Connecting the real system is a separate step, not part of this build. Other
 local-file-only prototypes do not need that plan.
 
-The project validator checks the fixed starter, allowed shape, configuration,
-declared content, and smoke expectations. Startup requires one to three
-`AIFunction` tools. The validator does not analyze editable C#; review
+The project validator checks the fixed starter, allowed shape, settings
+structure, declared content, declared hosts, and smoke expectations. Startup
+checks the `Agent` values and requires one to three `AIFunction` tools. The validator does not
+analyze editable C#; review
 `AgentDefinition.cs` and `Tools.cs` for the accepted local/mock scope, source
 paths, and unwanted external effects before building or running them.

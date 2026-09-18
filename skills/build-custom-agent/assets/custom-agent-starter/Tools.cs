@@ -3,8 +3,10 @@ using System.ComponentModel;
 namespace CustomAgent;
 
 /// <summary>
-/// Safe starter tools. They read only bundled local content and never call a
-/// live business system or perform a side effect.
+/// Tools the coding agent can add, change, or remove to fit the approved scenario.
+/// Register one to three in AgentDefinition.CreateTools for the running model to call.
+/// Each tool computes locally, reads declared content through KnowledgeBase, or reads an approved host through the
+/// ApprovedHttpClient from CreateTools (Capabilities:Network:AllowedHosts in appsettings.json); none has side effects.
 /// </summary>
 public class AssistantTools(KnowledgeBase knowledgeBase)
 {

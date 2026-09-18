@@ -2,11 +2,11 @@ using Microsoft.Extensions.AI;
 
 namespace CustomAgent;
 
-// The browser sends completed exchanges, not a session ID. Nothing is kept
-// globally or on disk, and callers cannot supply system or tool messages.
-public sealed record ChatTurn(string? User, string? Assistant);
-public sealed record ChatRequest(string? Message, ChatTurn?[]? History = null);
-
+/// <summary>
+/// Turns a chat request into model messages. The browser sends completed exchanges, not a session ID: nothing is kept
+/// globally or on disk, and callers cannot supply system or tool messages. History is capped at MaxTurns exchanges
+/// and MaxCharacters characters.
+/// </summary>
 public static class ChatHistory
 {
     public const int MaxMessageCharacters = 4_000;
@@ -55,3 +55,6 @@ public static class ChatHistory
         return true;
     }
 }
+
+public sealed record ChatTurn(string? User, string? Assistant);
+public sealed record ChatRequest(string? Message, ChatTurn?[]? History = null);

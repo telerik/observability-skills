@@ -2,6 +2,10 @@ using System.Text.Json;
 
 namespace ReleaseEvidenceReviewer;
 
+/// <summary>
+/// Runs the three --smoke cases through the same AgentRuntime as the web app, with prompts from the Smoke
+/// section of appsettings.json. Prints one SMOKE_REPORT line; exit code 0 means all passed.
+/// </summary>
 public sealed class SmokeRunner
 {
     private readonly AgentRuntime _runtime;
@@ -56,22 +60,23 @@ public sealed class SmokeRunner
         {
             var response = await _runtime.RunAsync(
                 smokeCase.Prompt,
-                smokeCase.CaseId,
                 cancellationToken);
             var passed = smokeCase.Passes(response);
             return new SmokeCaseResult(
                 smokeCase.CaseId,
                 passed ? "pass" : "fail",
-                response.TraceId,
                 passed ? "expected_behavior_observed" : smokeCase.FailureReason);
         }
         catch (AgentRunException ex)
         {
+            var reason = ex.InnerException is System.ClientModel.ClientResultException { Status: > 0 } azure
+                ? $"azure_openai_http_{azure.Status}"
+                : ex.Code;
+            Console.Error.WriteLine($"SMOKE_FAILURE={reason}");
             return new SmokeCaseResult(
                 smokeCase.CaseId,
                 "fail",
-                ex.TraceId,
-                "agent_run_failed");
+                reason);
         }
     }
 
@@ -99,6 +104,5 @@ public sealed class SmokeRunner
     private sealed record SmokeCaseResult(
         string CaseId,
         string Status,
-        string TraceId,
         string Reason);
 }

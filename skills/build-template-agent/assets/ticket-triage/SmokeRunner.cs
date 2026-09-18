@@ -2,6 +2,10 @@ using System.Text.Json;
 
 namespace TicketTriage;
 
+/// <summary>
+/// Runs the three --smoke cases through the same AgentRuntime as the web app, with ticket IDs from the Smoke
+/// section of appsettings.json. Prints one SMOKE_REPORT line; exit code 0 means all passed.
+/// </summary>
 public sealed class SmokeRunner(AgentRuntime runtime, IConfiguration configuration)
 {
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
@@ -32,15 +36,21 @@ public sealed class SmokeRunner(AgentRuntime runtime, IConfiguration configurati
         {
             try
             {
-                var reply = await runtime.RunAsync(smokeCase.TicketId, smokeCase.CaseId, cancellationToken);
+                var reply = await runtime.RunAsync(smokeCase.TicketId, cancellationToken);
+                // Pass on the typed recommendation and actual tool use, not on answer wording alone.
                 var passed = reply.Recommendation.TicketId == smokeCase.TicketId &&
-                             reply.ToolsUsed.Contains(nameof(AssistantTools.GetTicket)) &&
-                             reply.TraceId.Length == 32 && smokeCase.Passes(reply);
-                results.Add(new(smokeCase.CaseId, passed ? "pass" : "fail", reply.TraceId,
+                             reply.ToolsUsed.Contains(nameof(AssistantTools.GetTicket)) && smokeCase.Passes(reply);
+                results.Add(new(smokeCase.CaseId, passed ? "pass" : "fail",
                     passed ? "typed_evidence_and_tools_verified" : "expected_triage_behavior_missing"));
             }
             catch (AgentRunException ex)
-            { results.Add(new(smokeCase.CaseId, "fail", ex.TraceId, ex.Code)); }
+            {
+                var reason = ex.InnerException is System.ClientModel.ClientResultException { Status: > 0 } azure
+                    ? $"azure_openai_http_{azure.Status}"
+                    : ex.Code;
+                Console.Error.WriteLine($"SMOKE_FAILURE={reason}");
+                results.Add(new(smokeCase.CaseId, "fail", reason));
+            }
         }
         var status = results.All(result => result.Status == "pass") ? "pass" : "fail";
         Console.WriteLine("SMOKE_REPORT=" + JsonSerializer.Serialize(new { status, cases = results },
@@ -59,5 +69,5 @@ public sealed class SmokeRunner(AgentRuntime runtime, IConfiguration configurati
     private static bool AnswerContains(AgentReply reply, params string[] expected) =>
         expected.All(value => reply.Answer.Contains(value, StringComparison.OrdinalIgnoreCase));
     private sealed record SmokeCase(string CaseId, string TicketId, Func<AgentReply, bool> Passes);
-    private sealed record SmokeResult(string CaseId, string Status, string TraceId, string Reason);
+    private sealed record SmokeResult(string CaseId, string Status, string Reason);
 }
