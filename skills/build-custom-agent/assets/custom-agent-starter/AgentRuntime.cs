@@ -76,6 +76,7 @@ public class AgentRuntime
             var answer = new StringBuilder();
             var requestedTools = new Dictionary<string, string>(StringComparer.Ordinal);
             var toolsUsed = new List<string>();
+            var toolResults = new List<ToolResultText>();
             await foreach (var update in _agent.RunStreamingAsync(
                                messages,
                                session,
@@ -92,7 +93,10 @@ public class AgentRuntime
                     if (content is FunctionCallContent call && _toolNames.Contains(call.Name))
                         requestedTools[call.CallId] = call.Name;
                     else if (content is FunctionResultContent result && requestedTools.Remove(result.CallId, out var name))
+                    {
                         toolsUsed.Add(name);
+                        toolResults.Add(new ToolResultText(name, result.Result?.ToString() ?? ""));
+                    }
                 }
             }
 
@@ -100,7 +104,7 @@ public class AgentRuntime
             if (text.Length == 0)
                 throw new InvalidOperationException("empty_agent_response");
 
-            return new AgentReply(text, toolsUsed);
+            return new AgentReply(text, toolsUsed, toolResults);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -115,7 +119,10 @@ public class AgentRuntime
     }
 }
 
-public sealed record AgentReply(string Answer, IReadOnlyList<string> ToolsUsed);
+public sealed record AgentReply(string Answer, IReadOnlyList<string> ToolsUsed, IReadOnlyList<ToolResultText> ToolResults);
+
+/// <summary>What one registered tool returned during a run. Smoke reports quote it when a case fails.</summary>
+public sealed record ToolResultText(string Tool, string Result);
 
 public sealed class AgentRunException(Exception innerException)
     : Exception("agent_run_failed", innerException);

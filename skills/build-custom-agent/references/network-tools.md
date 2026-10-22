@@ -4,6 +4,14 @@ Read this before writing a tool that calls a host listed under **Network
 access** in the approved proposal. Write exactly those hosts, and no others, to
 `Capabilities:Network:AllowedHosts` as host names without scheme, port, or path.
 The smoke baseline freezes that list; a new host needs a new proposal and approval.
+Approve only public API hosts: the validator rejects `localhost`, local network
+names, and loopback or private addresses.
+
+Tool parameters are typed values such as an ID, a number, or a choice from a
+fixed list. Build the URL in the tool from a fixed `https://<approved-host>/`
+base and escape each value with `Uri.EscapeDataString`. Never accept a URL, host,
+or path from the model: injected content could make it send local data to the
+host in the query string.
 
 ## The approved-host client
 
@@ -35,6 +43,11 @@ public async Task<string> GetJoke(
 }
 ```
 
+Read API JSON with `JsonSerializer.Deserialize<T>(body, JsonSerializerOptions.Web)`:
+APIs use camelCase or lowercase names, and the default reader would leave every
+field empty. A tool that throws ends the run; `--smoke` reports it as
+`agent_run_failed:<exception type>:<message>`, so fix the tool rather than the model.
+
 Return the API data the model needs, not labels or citations it does not come
 from. Never report a network or server failure as "not found": that would let
 the `not-found` smoke pass while the API is down.
@@ -45,7 +58,8 @@ the `not-found` smoke pass while the API is down.
   random items, give the tool a parameter that selects a fixed item, such as an
   ID, so a smoke prompt can ask for it and check its text.
 - The `not-found` case asks for something the API does not have, such as an
-  unknown ID, and expects the answer for the tool's not-found result.
+  unknown ID. Its marker is plain wording the answer will contain, never the
+  tool's internal status or reason token such as `unsupported_category`.
 - Words in tool descriptions reach the model without a call; do not use them as
   markers.
 - Without declared content, the `knowledge` case checks a fact from a tool

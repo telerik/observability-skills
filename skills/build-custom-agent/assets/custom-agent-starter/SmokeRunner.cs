@@ -39,6 +39,7 @@ public sealed class SmokeRunner
         Console.WriteLine("SMOKE_REPORT=" + JsonSerializer.Serialize(report, new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
         }));
         return status == "pass" ? 0 : 1;
     }
@@ -57,26 +58,46 @@ public sealed class SmokeRunner
                 response.Answer.Contains(marker, StringComparison.OrdinalIgnoreCase));
             // Every case asks about local content, so an answer written without any tool result does not pass.
             var toolUsed = response.ToolsUsed.Count > 0;
+            var passed = toolUsed && markersFound;
             return new SmokeCaseResult(
                 smokeCase.CaseId,
-                toolUsed && markersFound ? "pass" : "fail",
+                passed ? "pass" : "fail",
                 !toolUsed ? "no_tool_result" : markersFound ? "tool_result_and_expected_content_observed" : "expected_markers_missing",
-                response.ToolsUsed);
+                response.ToolsUsed,
+                // A failing case quotes what the model answered and what each tool returned, so the cause can be
+                // found, such as an API value that differs from the expected marker. The markers stay frozen.
+                passed ? null : new SmokeEvidence(
+                    Excerpt(response.Answer, 600),
+                    response.ToolResults.Take(3).Select(tool => new SmokeToolEvidence(tool.Tool, Excerpt(tool.Result, 1_500))).ToArray()));
         }
         catch (AgentRunException ex)
         {
             // Name the failure the coding agent can act on: a provider error, a refused or failed network call,
-            // the 45-second deadline, or anything else.
+            // the 45-second deadline, or anything else. Anything else is usually an exception thrown by a tool, so its
+            // type and message are included; this report stays local, and the chat endpoint keeps its generic error.
             var reason = ex.InnerException switch
             {
                 System.ClientModel.ClientResultException { Status: > 0 } azure => $"azure_openai_http_{azure.Status}",
                 NetworkAccessException network => network.Reason,
                 OperationCanceledException => "agent_deadline_exceeded",
+                { } other => $"agent_run_failed:{other.GetType().Name}:{Shorten(other.Message)}",
                 _ => "agent_run_failed",
             };
             Console.Error.WriteLine($"SMOKE_FAILURE={reason}");
             return new SmokeCaseResult(smokeCase.CaseId, "fail", reason, []);
         }
+    }
+
+    private static string Excerpt(string text, int maxLength)
+    {
+        var line = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return line.Length <= maxLength ? line : line[..maxLength] + "…";
+    }
+
+    private static string Shorten(string message)
+    {
+        var line = string.Join(' ', message.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)).Trim();
+        return line.Length <= 160 ? line : line[..160] + "…";
     }
 
     private static SmokeCase ReadCase(IConfigurationSection section)
@@ -115,5 +136,10 @@ public sealed class SmokeRunner
         string CaseId,
         string Status,
         string Reason,
-        IReadOnlyList<string> Tools);
+        IReadOnlyList<string> Tools,
+        SmokeEvidence? Evidence = null);
+
+    private sealed record SmokeEvidence(string Answer, IReadOnlyList<SmokeToolEvidence> ToolResults);
+
+    private sealed record SmokeToolEvidence(string Tool, string Result);
 }

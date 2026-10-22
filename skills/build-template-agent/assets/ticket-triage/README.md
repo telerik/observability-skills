@@ -91,6 +91,7 @@ policy-derived recommendation.
 | `TriageRequest.cs` | The `/api/triage` request: ticket ID, optional question and temporary scenario |
 | `SmokeRunner.cs` | The three `--smoke` cases |
 | `appsettings.json` | Non-secret defaults: listen URL, deployment name, app name and smoke ticket IDs |
+| `packages.lock.json` | Exact version and content hash of every NuGet package; restore fails if a pinned package's content changes, and adding a package updates it |
 | `data/tickets.json`, `docs/triage-policy.md` | The bundled mock tickets and triage policy |
 | `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
 

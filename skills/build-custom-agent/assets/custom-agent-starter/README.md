@@ -72,6 +72,7 @@ tool that needs an approved host calls it through the client in `Capabilities.cs
 | `ChatHistory.cs` | Validates and bounds the chat history the browser sends |
 | `SmokeRunner.cs` | The three configured `--smoke` cases |
 | `appsettings.json` | Agent definition, UI preset, content sources, approved capabilities and smoke cases |
+| `packages.lock.json` | Exact version and content hash of every NuGet package; restore fails if a pinned package's content changes, and adding a package updates it |
 | `docs/`, `data/` | The local prototype content |
 | `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
 
@@ -92,7 +93,8 @@ characters.
 
 A smoke case passes when at least one registered tool returned a result and the
 answer contains the expected fragments, which the model is never told. The
-report lists the tools each case used. A pass does not prove the right tool was
+report lists the tools each case used. A failing case also quotes up to 600
+characters of the answer and 1,500 of each tool result as `evidence`. A pass does not prove the right tool was
 chosen, reasoning quality, or production safety, and it is not proof of backend
 ingestion: find the service, time and matching prompt on the
 [Progress Tracing page](https://observability.progress.com/observations).
@@ -174,7 +176,8 @@ redirects. `GetAsync(url, cancellationToken)` returns every status code with its
 body, so a tool can report data the API does not have; `GetStringAsync` returns
 only a successful body. A refused request, a body over 64 KiB, a request over
 10 seconds, or an unexpected status fails the run, and `--smoke` reports the
-reason, such as `network_host_not_approved` or `network_http_500`. `/api/health`
+reason, such as `network_host_not_approved` or `network_http_500`. Any other failure, usually an
+exception thrown by a tool, is reported as `agent_run_failed:<exception type>:<message>`. `/api/health`
 lists the approved hosts as `networkHosts`; an empty list means no network access.
 
 Nothing else is granted: no process execution, file writes, or environment or
