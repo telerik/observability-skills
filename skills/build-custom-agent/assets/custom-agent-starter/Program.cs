@@ -2,6 +2,7 @@ using Azure;
 using Azure.AI.OpenAI;
 using Azure.Identity;
 using Microsoft.Agents.AI;
+using Microsoft.AspNetCore.HostFiltering;
 using Microsoft.Extensions.AI;
 using Progress.Observability.Extensions.AI;
 
@@ -23,6 +24,8 @@ public static class Program
             WebRootPath = "wwwroot",
         });
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 256 * 1_024);
+        // Refuse requests addressed to any other host name; a web page using DNS rebinding sends its own domain here.
+        builder.Services.Configure<HostFilteringOptions>(options => options.AllowedHosts = ["127.0.0.1", "localhost"]);
 
         // Local user-secrets supply shared app settings; environment variables can override them.
         builder.Configuration

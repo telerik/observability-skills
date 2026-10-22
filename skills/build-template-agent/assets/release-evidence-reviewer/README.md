@@ -85,6 +85,7 @@ in `Tools.cs` to search the release evidence or check readiness before it answer
 | `KnowledgeBase.cs` | Loads `docs/*.md` and searches their paragraphs by matching words |
 | `SmokeRunner.cs` | The three `--smoke` cases |
 | `appsettings.json` | Non-secret defaults: listen URL, deployment name, app name and smoke prompts |
+| `packages.lock.json` | Exact version and content hash of every NuGet package; restore fails if a pinned package's content changes, and adding a package updates it |
 | `docs/` | The fictional readiness policy and project evidence |
 | `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
 

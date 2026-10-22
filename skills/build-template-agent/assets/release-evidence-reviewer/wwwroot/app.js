@@ -2,7 +2,7 @@
 const conversation = document.querySelector('#conversation');
 const input = document.querySelector('#message');
 const send = document.querySelector('#send');
-const initialConversation = conversation.innerHTML;
+const emptyState = document.querySelector('#empty').cloneNode(true);
 let reviewContext = null,
   revision = 0,
   controller = null,
@@ -149,7 +149,7 @@ document.querySelector('#new-review').addEventListener('click', () => {
   controller?.abort();
   controller = null;
   reviewContext = null;
-  conversation.innerHTML = initialConversation;
+  conversation.replaceChildren(emptyState.cloneNode(true));
   input.value = '';
   setBusy(false);
   updateContext();

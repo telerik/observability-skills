@@ -76,10 +76,10 @@ mocks with plan/revise, without offering a mock slice.
 
 ## Present the path choice
 
-A buildable request gets this proposal in chat before the native Build/Revise
-picker. Render it as Markdown, with a blank line after the heading and one
-bullet per field with a bold label, rather than as a code block or a single
-paragraph in the picker:
+A buildable request gets this complete proposal at the native Build/Revise
+gate. Follow `SKILL.md` for the host's question tool, content fields, and chat
+fallback. Render it as Markdown with a blank line after the heading and one
+bullet per bold-labeled field, not a code block:
 
 ```markdown
 **Proposed local prototype**
@@ -102,7 +102,7 @@ access and build` instead of `Build proposed agent`; the hosts named there are
 exactly the ones written to `Capabilities:Network:AllowedHosts`. When a
 requested capability is simplified or deferred, make
 Purpose describe the actual demonstration and add a concise **Scope limit:**
-paragraph after the fields and before the picker. Name the requested capability,
+paragraph after the fields and before the choices. Name the requested capability,
 what the prototype will do in its place, and what will not be implemented.
 Tailor this explanation to the request; omit unrelated exclusions. Labels such
 as `mock data` or `no live adapter` alone do not explain a change in capability.
@@ -114,14 +114,16 @@ as mock. Carry the accepted limits into revisions and handoff, and preserve
 the full goal as deferred developer work in the integration plan when required.
 Do not imply the agent already exists.
 
-For a complex/live request, put two to four plain sentences only in the native
-question body: why the full goal is outside this MVP and how an implementation
+For a complex/live request, put two to four plain sentences in the native
+question's displayed body, using `SKILL.md`'s host mapping and fallback: why the
+full goal is outside this MVP and how an implementation
 plan helps. Describe a mock slice and its exclusions only when that option is
 eligible. If mocks are rejected or no useful slice fits, explain that revision
 can narrow the scope and offer plan/revise. Append a blank line and
 `How would you like to continue?`; show neither a plan preview nor four fields.
-Go directly to this question after reading the reference, without a scope-summary
-commentary message. Use the host's question tool with the applicable two choices.
+When the tool can display the full explanation, go directly to this question
+after reading the reference, without a scope-summary commentary message. Use
+the host's question tool with the applicable two choices.
 
 For the complex/live choice, keep all rationale in that box, with short
 structured choice labels. Use the same native mechanism for plan/revise and

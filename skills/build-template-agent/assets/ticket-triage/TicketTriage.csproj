@@ -5,6 +5,8 @@
     <Nullable>enable</Nullable>
     <RootNamespace>TicketTriage</RootNamespace>
     <UserSecretsId>Progress.AgentBuilder.Mvp</UserSecretsId>
+    <!-- packages.lock.json pins every direct and transitive package with its content hash; restore fails if a pinned package's content changes, and adding a package updates the file. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />

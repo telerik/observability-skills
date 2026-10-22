@@ -80,6 +80,7 @@ in `Tools.cs` to search and read the bundled documents before it answers.
 | `DocumentStore.cs` | Loads `docs/*.md` as sections and searches them by matching words |
 | `SmokeRunner.cs` | The three `--smoke` cases |
 | `appsettings.json` | Non-secret defaults: listen URL, deployment name, app name and smoke prompts |
+| `packages.lock.json` | Exact version and content hash of every NuGet package; restore fails if a pinned package's content changes, and adding a package updates it |
 | `docs/` | The four bundled synthetic manuals |
 | `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
 

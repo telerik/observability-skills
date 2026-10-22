@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -25,6 +27,7 @@ static class ProjectValidator
         "ChatHistory.cs",
         "CustomAgent.csproj",
         "KnowledgeBase.cs",
+        "packages.lock.json",
         "Program.cs",
         "README.md",
         "SmokeRunner.cs",
@@ -334,7 +337,31 @@ static class ProjectValidator
             throw new InvalidDataException("Capabilities:Network:AllowedHosts entries must be host names without scheme, port or path.");
         if (hosts.Distinct(StringComparer.OrdinalIgnoreCase).Count() != hosts.Length)
             throw new InvalidDataException("Capabilities:Network:AllowedHosts must not repeat a host.");
+        var local = hosts.FirstOrDefault(IsLocalOrPrivateHost);
+        if (local is not null)
+            throw new InvalidDataException(
+                $"Capabilities:Network:AllowedHosts must list public API hosts only, not the local machine or a private network: '{local}'.");
         return capabilities;
+    }
+
+    private static bool IsLocalOrPrivateHost(string host)
+    {
+        // A name reserved for this machine or a local network, or an IPv4 address in the loopback, private,
+        // link-local, shared or "this network" ranges. This checks the declared text only; a public name that
+        // resolves to a private address is not detected here.
+        var name = host.TrimEnd('.').ToLowerInvariant();
+        if (name == "localhost" || name.EndsWith(".localhost", StringComparison.Ordinal) ||
+            name.EndsWith(".local", StringComparison.Ordinal) || name.EndsWith(".internal", StringComparison.Ordinal) ||
+            name.EndsWith(".home.arpa", StringComparison.Ordinal))
+            return true;
+        if (!IPAddress.TryParse(name, out var address) || address.AddressFamily != AddressFamily.InterNetwork)
+            return false;
+        var b = address.GetAddressBytes();
+        return b[0] is 0 or 10 or 127 ||
+               (b[0] == 169 && b[1] == 254) ||
+               (b[0] == 172 && b[1] is >= 16 and <= 31) ||
+               (b[0] == 192 && b[1] == 168) ||
+               (b[0] == 100 && b[1] is >= 64 and <= 127);
     }
 
     private static int ValidateContentSources(
@@ -406,7 +433,9 @@ static class ProjectValidator
                 $"Smoke case '{caseId}' needs at least one fact or source path marker (four or more characters) that is not in its prompt" +
                 (checkInstructions ? " or in Agent:Instructions." : "."));
         }
-        if (markers.Any(marker => Regex.IsMatch(marker, @"^(status|mode|source)=", RegexOptions.IgnoreCase)))
+        // Internal tokens are key=value fields or snake_case identifiers such as unsupported_category; the response
+        // policy keeps them out of answers, so a smoke that expects one can never pass.
+        if (markers.Any(marker => Regex.IsMatch(marker, @"^[A-Za-z_][\w.-]*=|^[a-z0-9]+(?:_[a-z0-9]+)+$")))
             throw new InvalidDataException($"Smoke case '{caseId}' must check plain-text facts or source paths, not internal diagnostic tokens.");
         // Without declared content, the knowledge case checks a fact from a tool result instead of a source path.
         if (caseId == "knowledge" && hasContent && !markers.Any(marker =>

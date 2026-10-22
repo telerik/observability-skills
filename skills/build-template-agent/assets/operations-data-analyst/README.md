@@ -101,6 +101,7 @@ explanation.
 | `Models.cs` | Request, view, result and reply records shared by the files above |
 | `SmokeRunner.cs` | The three `--smoke` cases |
 | `appsettings.json` | Non-secret defaults: listen URL, deployment name and app name |
+| `packages.lock.json` | Exact version and content hash of every NuGet package; restore fails if a pinned package's content changes, and adding a package updates it |
 | `data/operations.csv` | The synthetic metrics |
 | `wwwroot/` | The page: `index.html`, `styles.css` and `app.js` |
 
