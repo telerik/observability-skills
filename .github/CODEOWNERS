@@ -1,0 +1,4 @@
+# Each path needs two owners: authors cannot approve their own pull requests.
+*                              @lini @lyuatanasov @aleksandra992
+/skills/build-template-agent/  @Peykov @lini @aleksandra992
+/skills/build-custom-agent/    @Peykov @lini @aleksandra992
